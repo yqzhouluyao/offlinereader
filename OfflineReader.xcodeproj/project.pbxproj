@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -98,7 +98,7 @@
 		33A8481F86F41F5ABD825550 /* BookRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepository.swift; sourceTree = "<group>"; };
 		33C37E5DCCF9C47EC2266C38 /* LibraryGroupStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryGroupStore.swift; sourceTree = "<group>"; };
 		388F434B1E2BA71388B1414E /* FileImportCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileImportCoordinator.swift; sourceTree = "<group>"; };
-		46387A50702D4C7C93203DA0 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		46387A50702D4C7C93203DA0 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		498345ABF99682269751BE87 /* ReaderPreferencesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderPreferencesStore.swift; sourceTree = "<group>"; };
 		4B03F01A94B8F1C80698DEA6 /* OfflineReaderApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineReaderApp.swift; sourceTree = "<group>"; };
 		4CC142D6D40CC02121E8CF82 /* BookFileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookFileStore.swift; sourceTree = "<group>"; };
@@ -111,7 +111,7 @@
 		5C8A79DD77BFA5E204B5CA26 /* PlainTextReaderSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlainTextReaderSession.swift; sourceTree = "<group>"; };
 		62B99A1E3D635494488A190D /* WiFiTransferView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiFiTransferView.swift; sourceTree = "<group>"; };
 		665DC6F9841537D4D463AACA /* BookFileStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookFileStoreTests.swift; sourceTree = "<group>"; };
-		6781D60EC4282E4AEF323542 /* OfflineReader.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = OfflineReader.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		6781D60EC4282E4AEF323542 /* OfflineReader.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OfflineReader.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7274FC704A31F6D1602970C6 /* OfflineReaderTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = OfflineReaderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		73AD74EA827E1D9B7A24F8ED /* WiFiTransferViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiFiTransferViewModel.swift; sourceTree = "<group>"; };
 		7BCA73884BD0EC519887A878 /* LibraryViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryViewModel.swift; sourceTree = "<group>"; };
@@ -140,7 +140,7 @@
 		DEF00EDB60AF664CD0E06B34 /* Clamping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Clamping.swift; sourceTree = "<group>"; };
 		E3535C4AA654283A589E6285 /* LocalAddressResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAddressResolver.swift; sourceTree = "<group>"; };
 		EC43216D833F0A17293FFEF0 /* TableOfContentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableOfContentsView.swift; sourceTree = "<group>"; };
-		EEB063C2812E7DB52A168BEF /* childrens-literature.epub */ = {isa = PBXFileReference; path = "childrens-literature.epub"; sourceTree = "<group>"; };
+		EEB063C2812E7DB52A168BEF /* childrens-literature.epub */ = {isa = PBXFileReference; lastKnownFileType = file; path = "childrens-literature.epub"; sourceTree = "<group>"; };
 		F3D70E7172362C531CED3471 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F5A5E6FC58A24DE57F1A343B /* WiFiTransferService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiFiTransferService.swift; sourceTree = "<group>"; };
 		F6413010F2CE7CDACB9AD59A /* SHA256Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SHA256Tests.swift; sourceTree = "<group>"; };
@@ -555,7 +555,6 @@
 				F2BC73D38CEC98641E998FBF /* XCLocalSwiftPackageReference "Vendor/FlyingFox-0.26.0" */,
 				363F350F73F50DEC6BFFEA12 /* XCLocalSwiftPackageReference "Vendor/readium-swift-toolkit-3.9.0" */,
 			);
-			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -804,6 +803,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 77K3WGK54V;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -884,6 +884,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 77K3WGK54V;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = NO;
