@@ -226,12 +226,11 @@ struct LibraryView: View {
             spacing: 28
         ) {
             ForEach(viewModel.books) { book in
-                Button {
-                    router.openReader(bookID: book.id)
-                } label: {
-                    LibraryBookGridItemView(book: book, fileStore: container.fileStore)
-                }
-                .buttonStyle(.plain)
+                LibraryBookGridItemView(
+                    book: book,
+                    fileStore: container.fileStore,
+                    onOpen: { router.openReader(bookID: book.id) }
+                )
                 .simultaneousGesture(
                     LongPressGesture(minimumDuration: 0.36)
                         .onEnded { _ in viewModel.enterEditing(selecting: book) }
@@ -248,7 +247,6 @@ struct LibraryView: View {
                         Label("library.delete", systemImage: "trash")
                     }
                 }
-                .accessibilityIdentifier("library.book.\(book.id.uuidString)")
             }
         }
         .padding(.horizontal, 22)
@@ -259,12 +257,11 @@ struct LibraryView: View {
     private var bookList: some View {
         LazyVStack(spacing: 22) {
             ForEach(viewModel.books) { book in
-                Button {
-                    router.openReader(bookID: book.id)
-                } label: {
-                    LibraryBookRowView(book: book, fileStore: container.fileStore)
-                }
-                .buttonStyle(.plain)
+                LibraryBookRowView(
+                    book: book,
+                    fileStore: container.fileStore,
+                    onOpen: { router.openReader(bookID: book.id) }
+                )
                 .simultaneousGesture(
                     LongPressGesture(minimumDuration: 0.36)
                         .onEnded { _ in viewModel.enterEditing(selecting: book) }
@@ -281,7 +278,6 @@ struct LibraryView: View {
                         Label("library.delete", systemImage: "trash")
                     }
                 }
-                .accessibilityIdentifier("library.book.\(book.id.uuidString)")
             }
         }
         .padding(.horizontal, 22)
@@ -558,31 +554,38 @@ private struct FilterChip: View {
 private struct LibraryBookGridItemView: View {
     let book: BookRecord
     let fileStore: BookFileStore
+    let onOpen: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            ZStack(alignment: .topTrailing) {
-                LibraryCoverView(book: book, fileStore: fileStore)
-                    .aspectRatio(0.74, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                    )
+            Button(action: onOpen) {
+                VStack(alignment: .leading, spacing: 9) {
+                    ZStack(alignment: .topTrailing) {
+                        LibraryCoverView(book: book, fileStore: fileStore)
+                            .aspectRatio(0.74, contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                            )
 
-                Image(systemName: "arrow.up.to.line.compact")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 24, height: 24)
-                    .background(Color.black.opacity(0.45), in: UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: 5)))
+                        Image(systemName: "arrow.up.to.line.compact")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 24, height: 24)
+                            .background(Color.black.opacity(0.45), in: UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: 5)))
+                    }
+
+                    Text(book.title)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(LibraryPalette.primary)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.78)
+                        .frame(minHeight: 42, alignment: .topLeading)
+                }
             }
-
-            Text(book.title)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(LibraryPalette.primary)
-                .lineLimit(2)
-                .minimumScaleFactor(0.78)
-                .frame(minHeight: 42, alignment: .topLeading)
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("library.book.\(book.id.uuidString)")
 
             HStack(spacing: 5) {
                 Text("已读")
@@ -594,7 +597,6 @@ private struct LibraryBookGridItemView: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 2)
-                LibraryListenGlyph()
             }
             .font(.system(size: 14, weight: .medium))
         }
@@ -602,47 +604,44 @@ private struct LibraryBookGridItemView: View {
     }
 }
 
-private struct LibraryListenGlyph: View {
-    var body: some View {
-        Image(systemName: "headphones")
-            .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(LibraryPalette.secondary)
-            .frame(width: 22, height: 22)
-            .accessibilityLabel("听书")
-    }
-}
-
 private struct LibraryBookRowView: View {
     let book: BookRecord
     let fileStore: BookFileStore
+    let onOpen: () -> Void
 
     var body: some View {
         HStack(spacing: 16) {
-            LibraryCoverView(book: book, fileStore: fileStore)
-                .frame(width: 68, height: 92)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                )
+            Button(action: onOpen) {
+                HStack(spacing: 16) {
+                    LibraryCoverView(book: book, fileStore: fileStore)
+                        .frame(width: 68, height: 92)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                        )
 
-            VStack(alignment: .leading, spacing: 11) {
-                Text(book.title)
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(LibraryPalette.primary)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.82)
+                    VStack(alignment: .leading, spacing: 11) {
+                        Text(book.title)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundStyle(LibraryPalette.primary)
+                            .lineLimit(2)
+                            .minimumScaleFactor(0.82)
 
-                Text(continueText)
-                    .font(.system(size: 16, weight: .regular))
-                    .foregroundStyle(LibraryPalette.secondary)
-                    .lineLimit(1)
+                        Text(continueText)
+                            .font(.system(size: 16, weight: .regular))
+                            .foregroundStyle(LibraryPalette.secondary)
+                            .lineLimit(1)
 
-                Text(progressText)
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(LibraryPalette.accent)
-                    .lineLimit(1)
+                        Text(progressText)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(LibraryPalette.accent)
+                            .lineLimit(1)
+                    }
+                }
             }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("library.book.\(book.id.uuidString)")
 
             Spacer(minLength: 12)
 
@@ -652,12 +651,6 @@ private struct LibraryBookRowView: View {
                     .foregroundStyle(.white)
                     .frame(width: 48, height: 48)
                     .background(.black, in: Circle())
-
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(LibraryPalette.muted)
-                    .frame(width: 18)
-                    .rotationEffect(.degrees(90))
             }
         }
         .contentShape(Rectangle())
@@ -754,7 +747,9 @@ private struct LibraryGroupGrid: View {
                 let books = booksForGroup(group)
                 VStack(alignment: .leading, spacing: 12) {
                     LibraryGroupCoverCollage(books: books, fileStore: fileStore)
-                        .frame(height: 116)
+                        .frame(width: 116, height: 116)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .clipped()
                     Text(group.name)
                         .font(.system(size: 19, weight: .semibold))
                         .foregroundStyle(LibraryPalette.primary)
@@ -777,30 +772,50 @@ private struct LibraryGroupCoverCollage: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let gap: CGFloat = 4
-            let side = (min(proxy.size.width, proxy.size.height) - gap) / 2
-            ZStack(alignment: .topLeading) {
-                ForEach(Array(books.prefix(4)).indices, id: \.self) { index in
-                    let row = CGFloat(index / 2)
-                    let column = CGFloat(index % 2)
-                    LibraryCoverView(book: Array(books.prefix(4))[index], fileStore: fileStore)
-                        .frame(width: side, height: side)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .offset(x: column * (side + gap), y: row * (side + gap))
-                }
+            let side = min(proxy.size.width, proxy.size.height)
+            let previewBooks = Array(books.prefix(4))
+            let inset: CGFloat = side < 90 ? 4 : 6
+            let gap: CGFloat = side < 90 ? 3 : 5
+            let contentSide = max(0, side - inset * 2)
+            let cellSide = max(0, (contentSide - gap) / 2)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.black.opacity(0.92))
 
                 if books.isEmpty {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.white.opacity(0.06))
                     Image(systemName: "folder")
                         .font(.system(size: 32, weight: .medium))
                         .foregroundStyle(LibraryPalette.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    VStack(spacing: gap) {
+                        ForEach(0..<2, id: \.self) { row in
+                            HStack(spacing: gap) {
+                                ForEach(0..<2, id: \.self) { column in
+                                    let index = row * 2 + column
+                                    if index < previewBooks.count {
+                                        LibraryCoverView(book: previewBooks[index], fileStore: fileStore)
+                                            .frame(width: cellSide, height: cellSide)
+                                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                                    } else {
+                                        Color.clear
+                                            .frame(width: cellSide, height: cellSide)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .frame(width: contentSide, height: contentSide, alignment: .topLeading)
                 }
             }
-            .frame(width: min(proxy.size.width, proxy.size.height), height: min(proxy.size.width, proxy.size.height))
+            .frame(width: side, height: side)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipped()
+            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
         }
         .aspectRatio(1, contentMode: .fit)
+        .clipped()
     }
 }
 

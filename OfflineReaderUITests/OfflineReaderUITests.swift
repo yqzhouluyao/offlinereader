@@ -67,4 +67,17 @@ final class OfflineReaderUITests: XCTestCase {
         XCTAssertTrue(app.buttons["library.shelf.organize"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["Biography"].waitForExistence(timeout: 3))
     }
+
+    @MainActor
+    func testLibraryDoesNotShowListenButtons() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-testing")
+        app.launchArguments.append("-ui-testing-seed-library")
+        app.launch()
+
+        let bookButtons = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "library.book."))
+        XCTAssertTrue(bookButtons.element(boundBy: 0).waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "library.listen.book.")).count, 0)
+        XCTAssertFalse(app.buttons["listening.miniPlayer.playPause"].exists)
+    }
 }

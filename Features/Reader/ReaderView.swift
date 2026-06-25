@@ -23,8 +23,10 @@ struct ReaderView: View {
     }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottom) {
             readerContent
+            readerListeningControls
+            readerListenButton
             modalDimmingLayer
             readerToast
         }
@@ -87,16 +89,71 @@ struct ReaderView: View {
     }
 
     @ViewBuilder
+    private var readerListenButton: some View {
+        if case .loaded = viewModel.state,
+           activePanel == .summary,
+           viewModel.isListeningAvailable,
+           !viewModel.shouldShowReaderListeningControls {
+            Button {
+                Task {
+                    await viewModel.startListening()
+                    showToast("已开始听书")
+                }
+            } label: {
+                Image(systemName: "headphones")
+                    .font(.system(size: 21, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 54, height: 54)
+                    .background(ReaderPalette.accent, in: Circle())
+                    .shadow(color: .black.opacity(0.24), radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 18)
+            .padding(.bottom, shouldShowChrome ? 102 : 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            .transition(.scale(scale: 0.92).combined(with: .opacity))
+            .accessibilityIdentifier("reader.listen")
+            .accessibilityLabel("听书")
+        }
+    }
+
+    @ViewBuilder
+    private var readerListeningControls: some View {
+        if case .loaded = viewModel.state,
+           activePanel == .summary,
+           viewModel.shouldShowReaderListeningControls,
+           let book = viewModel.book {
+            ReaderInlineListeningControls(
+                book: book,
+                fileStore: container.fileStore,
+                isPlaying: viewModel.isReaderListeningPlaying,
+                onTogglePlayback: { viewModel.pauseOrResumeListening() },
+                onFocusCurrentSentence: {
+                    Task { await viewModel.focusListeningPosition() }
+                },
+                onClose: { viewModel.stopListening() }
+            )
+            .padding(.horizontal, 24)
+            .padding(.bottom, shouldShowChrome ? 30 : 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .accessibilityIdentifier("reader.inlineListening")
+        }
+    }
+
+    @ViewBuilder
     private var topChrome: some View {
         if shouldShowChrome {
             ReaderTopBar(
                 progressText: viewModel.readProgressText,
                 shareText: viewModel.shareText,
+                isBookmarkSelected: viewModel.isCurrentBookmarkSelected,
                 onBack: { router.popToLibrary() },
                 onTOC: { setActivePanel(.toc) },
                 onAddBookmark: {
-                    viewModel.addBookmark()
-                    showToast("已添加书签")
+                    let wasSelected = viewModel.isCurrentBookmarkSelected
+                    viewModel.toggleBookmark()
+                    showToast(wasSelected ? "已取消书签" : "已添加书签")
                 },
                 onSearch: { isSearchPresented = true }
             )
@@ -153,9 +210,10 @@ struct ReaderView: View {
 
     @ViewBuilder
     private var modalDimmingLayer: some View {
-        if shouldShowChrome && activePanel.usesDimmingLayer {
-            Color.black.opacity(0.32)
+        if shouldShowChrome && activePanel != .summary {
+            Color.black.opacity(activePanel.usesDimmingLayer ? 0.32 : 0.001)
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
                 .onTapGesture { setActivePanel(.summary) }
                 .transition(.opacity)
         }
@@ -242,9 +300,130 @@ private enum ReaderPalette {
     static let divider = Color.black.opacity(0.08)
 }
 
+private struct ReaderInlineListeningControls: View {
+    let book: BookRecord
+    let fileStore: BookFileStore
+    let isPlaying: Bool
+    let onTogglePlayback: () -> Void
+    let onFocusCurrentSentence: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 18) {
+            HStack(spacing: 8) {
+                ReaderListeningCoverThumbnail(
+                    title: book.title,
+                    coverRelativePath: book.coverRelativePath,
+                    fileStore: fileStore
+                )
+                .frame(width: 46, height: 58)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
+
+                Button(action: onTogglePlayback) {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .frame(width: 58, height: 58)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("reader.inlineListening.playPause")
+                .accessibilityLabel(isPlaying ? "暂停听书" : "继续听书")
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.70))
+                        .frame(width: 54, height: 58)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("reader.inlineListening.close")
+                .accessibilityLabel("关闭听书")
+            }
+            .padding(.leading, 0)
+            .padding(.trailing, 8)
+            .frame(height: 58)
+            .background(Color(red: 0.48, green: 0.51, blue: 0.57).opacity(0.88), in: Capsule())
+            .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+
+            Spacer(minLength: 18)
+
+            Button(action: onFocusCurrentSentence) {
+                Text("听")
+                    .font(.system(size: 25, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 66, height: 66)
+                    .background(Color(red: 0.43, green: 0.46, blue: 0.52).opacity(0.94), in: Circle())
+                    .shadow(color: .black.opacity(0.20), radius: 8, y: 3)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("reader.inlineListening.listen")
+            .accessibilityLabel("定位到正在朗读的句子")
+        }
+        .frame(maxWidth: .infinity)
+        .allowsHitTesting(true)
+    }
+}
+
+private struct ReaderListeningCoverThumbnail: View {
+    let title: String
+    let coverRelativePath: String?
+    let fileStore: BookFileStore
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ReaderListeningCoverPlaceholder(title: title)
+            }
+        }
+        .clipped()
+        .task(id: coverRelativePath ?? "") {
+            await loadCover()
+        }
+    }
+
+    private func loadCover() async {
+        guard let coverRelativePath,
+              let url = try? await fileStore.resolve(relativePath: coverRelativePath),
+              let loaded = UIImage(contentsOfFile: url.path)
+        else {
+            image = nil
+            return
+        }
+        image = loaded
+    }
+}
+
+private struct ReaderListeningCoverPlaceholder: View {
+    let title: String
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.96, green: 0.70, blue: 0.48),
+                    Color(red: 0.86, green: 0.19, blue: 0.13)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Text(title.trimmingCharacters(in: .whitespacesAndNewlines).first.map(String.init) ?? "书")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.white)
+        }
+    }
+}
+
 private struct ReaderTopBar: View {
     let progressText: String
     let shareText: String
+    let isBookmarkSelected: Bool
     let onBack: () -> Void
     let onTOC: () -> Void
     let onAddBookmark: () -> Void
@@ -289,13 +468,14 @@ private struct ReaderTopBar: View {
             .accessibilityIdentifier("reader.top.share")
 
             Button(action: onAddBookmark) {
-                Image(systemName: "bookmark")
+                Image(systemName: isBookmarkSelected ? "bookmark.fill" : "bookmark")
                     .font(.system(size: 23, weight: .regular))
+                    .foregroundStyle(isBookmarkSelected ? ReaderPalette.accent : Color(.label))
                     .frame(width: 34, height: 38)
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("reader.top.addBookmark")
-            .accessibilityLabel(Text("添加书签"))
+            .accessibilityLabel(Text(isBookmarkSelected ? "取消书签" : "添加书签"))
 
             Button(action: onSearch) {
                 Image(systemName: "magnifyingglass")
@@ -1256,10 +1436,30 @@ private struct ReaderSliderRow: View {
                 .frame(width: 42, alignment: .leading)
 
             HStack(spacing: 14) {
-                Text(leadingLabel)
+                Button {
+                    adjustValue(by: -1)
+                } label: {
+                    Text(leadingLabel)
+                        .frame(width: 28, height: 38)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(value <= 1)
+                .accessibilityIdentifier("reader.settings.slider.\(title).decrease")
+
                 Slider(value: $value, in: 1 ... 5, step: 1)
                     .tint(Color(.systemGray4))
-                Text(trailingLabel)
+
+                Button {
+                    adjustValue(by: 1)
+                } label: {
+                    Text(trailingLabel)
+                        .frame(width: 28, height: 38)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(value >= 5)
+                .accessibilityIdentifier("reader.settings.slider.\(title).increase")
             }
             .font(.system(size: 17, weight: .semibold))
             .foregroundStyle(ReaderPalette.secondaryText)
@@ -1267,6 +1467,11 @@ private struct ReaderSliderRow: View {
             .frame(height: 50)
             .background(ReaderPalette.paleControl, in: Capsule())
         }
+    }
+
+    private func adjustValue(by delta: Int) {
+        let current = Int(value.rounded()).clamped(to: 1 ... 5)
+        value = Double((current + delta).clamped(to: 1 ... 5))
     }
 }
 

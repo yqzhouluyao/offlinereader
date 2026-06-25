@@ -30,6 +30,8 @@ final class ReaderViewModel {
     var bookmarks: [ReaderBookmark] = []
     var searchResults: [ReaderSearchResultItem] = []
     var isSearching = false
+    var listeningState: ReaderListeningState = .inactive
+    var isCurrentBookmarkSelected = false
     var progressPercentText: String {
         let percent = Int((readingProgress * 100).rounded())
         return "\(percent)%"
@@ -60,6 +62,37 @@ final class ReaderViewModel {
         return "《\(book.title)》 - \(author)"
     }
 
+    var isListeningAvailable: Bool {
+        session?.isListeningAvailable == true
+    }
+
+    var shouldShowReaderListeningControls: Bool {
+        listeningState.isActive || activeListeningSnapshot != nil
+    }
+
+    var isReaderListeningPlaying: Bool {
+        if listeningState.isActive {
+            return listeningState.isPlaying
+        }
+        return activeListeningSnapshot?.isPlaying ?? false
+    }
+
+    var readerListeningRemainingText: String {
+        if listeningState.isActive {
+            return listeningState.remainingTimeText
+        }
+        return activeListeningSnapshot?.remainingTimeText ?? "--:--"
+    }
+
+    private var activeListeningSnapshot: ListeningSessionSnapshot? {
+        guard let snapshot = container.listeningStore.session,
+              snapshot.bookID == bookID
+        else {
+            return nil
+        }
+        return snapshot
+    }
+
     private var readingProgress: Double {
         (book?.readingProgress ?? 0).clamped(to: 0 ... 1)
     }
@@ -88,10 +121,23 @@ final class ReaderViewModel {
             let session = try await makeSession(for: record, fileURL: fileURL, format: format)
             bookmarks = container.readerBookmarkStore.load(bookID: record.id)
             session.onLocationChanged = { [weak self] data, progress in
+                self?.updateCurrentBookmarkSelection(locatorData: data)
                 self?.schedulePositionSave(locatorData: data, progress: progress)
             }
             session.onChromeToggleRequested = { [weak self] in
                 self?.isChromeVisible.toggle()
+            }
+            session.onListeningStateChanged = { [weak self, container, record] state in
+                if let self {
+                    self.syncListeningStore(with: state)
+                } else {
+                    Self.syncListeningStore(
+                        container: container,
+                        book: record,
+                        state: state,
+                        fallbackSectionTitle: record.title
+                    )
+                }
             }
             self.session = session
             try await session.start()
@@ -99,6 +145,7 @@ final class ReaderViewModel {
             totalPageCount = await session.totalPageCount()
             updateCurrentSectionTitle(from: session.currentLocatorData)
             updateCurrentPage(from: session.currentLocatorData, progress: record.readingProgress)
+            updateCurrentBookmarkSelection(locatorData: session.currentLocatorData)
             state = .loaded
         } catch {
             state = .failed(error.localizedDescription)
@@ -115,6 +162,9 @@ final class ReaderViewModel {
                 openedAt: Date()
             )
         }
+        if listeningState.isActive || activeListeningSnapshot != nil {
+            return
+        }
         await session?.close()
     }
 
@@ -126,8 +176,14 @@ final class ReaderViewModel {
         }
     }
 
-    func addBookmark() {
+    func toggleBookmark() {
         guard let locatorData = session?.currentLocatorData else {
+            return
+        }
+
+        if let existing = bookmarkMatchingCurrentPosition(locatorData: locatorData) {
+            deleteBookmark(existing)
+            isCurrentBookmarkSelected = false
             return
         }
 
@@ -151,11 +207,17 @@ final class ReaderViewModel {
         )
         bookmarks.append(bookmark)
         container.readerBookmarkStore.save(bookmarks, bookID: bookID)
+        isCurrentBookmarkSelected = true
+    }
+
+    func addBookmark() {
+        toggleBookmark()
     }
 
     func deleteBookmark(_ bookmark: ReaderBookmark) {
         bookmarks.removeAll { $0.id == bookmark.id }
         container.readerBookmarkStore.save(bookmarks, bookID: bookID)
+        updateCurrentBookmarkSelection(locatorData: session?.currentLocatorData)
     }
 
     func goToBookmark(_ bookmark: ReaderBookmark) async {
@@ -163,6 +225,7 @@ final class ReaderViewModel {
             try await session?.go(to: bookmark.locatorData)
             updateCurrentSectionTitle(from: bookmark.locatorData)
             updateCurrentPage(from: bookmark.locatorData, progress: bookmark.progress)
+            isCurrentBookmarkSelected = true
         } catch {
             state = .failed("书签位置无法打开")
         }
@@ -193,6 +256,71 @@ final class ReaderViewModel {
         searchGeneration += 1
         searchResults = []
         isSearching = false
+    }
+
+    func startListening() async {
+        guard let book,
+              let session,
+              session.isListeningAvailable
+        else {
+            return
+        }
+        let playbackSession = session
+        listeningState = ReaderListeningState(
+            isActive: true,
+            isPlaying: true,
+            chapterTitle: currentSectionTitle,
+            utteranceText: "",
+            locatorData: session.currentLocatorData ?? book.readingLocatorData,
+            remainingSeconds: 12 * 60
+        )
+        container.listeningStore.start(
+            book: book,
+            locatorData: session.currentLocatorData ?? book.readingLocatorData,
+            fallbackSectionTitle: currentSectionTitle,
+            progress: book.readingProgress,
+            isPlaying: true,
+            onTogglePlayback: {
+                Task { @MainActor in
+                    playbackSession.pauseOrResumeListening()
+                }
+            },
+            onStopPlayback: {
+                Task { @MainActor in
+                    playbackSession.stopListening()
+                    await playbackSession.close()
+                }
+            }
+        )
+        await session.startListening()
+    }
+
+    func pauseOrResumeListening() {
+        if listeningState.isActive {
+            session?.pauseOrResumeListening()
+        } else if activeListeningSnapshot != nil {
+            container.listeningStore.togglePlayback()
+        }
+    }
+
+    func focusListeningPosition() async {
+        if listeningState.isActive {
+            await session?.focusListeningPosition()
+        } else if let locatorData = activeListeningSnapshot.flatMap({ _ in book?.readingLocatorData }) {
+            try? await session?.go(to: locatorData)
+        }
+    }
+
+    func stopListening() {
+        if listeningState.isActive {
+            session?.stopListening()
+            listeningState = .inactive
+            if let book {
+                container.listeningStore.finish(bookID: book.id)
+            }
+        } else if activeListeningSnapshot != nil {
+            container.listeningStore.stop()
+        }
     }
 
     func goToSearchResult(_ result: ReaderSearchResultItem) async {
@@ -278,9 +406,69 @@ final class ReaderViewModel {
             book?.readingProgress = progress.clamped(to: 0 ... 1)
             updateCurrentSectionTitle(from: locatorData)
             updateCurrentPage(from: locatorData, progress: progress)
+            if let book {
+                container.listeningStore.update(
+                    book: book,
+                    locatorData: locatorData,
+                    fallbackSectionTitle: currentSectionTitle,
+                    progress: progress
+                )
+            }
         } catch {
             AppLog.reader.error("Failed to save reader position")
         }
+    }
+
+    private func updateCurrentBookmarkSelection(locatorData: Data?) {
+        isCurrentBookmarkSelected = bookmarkMatchingCurrentPosition(locatorData: locatorData) != nil
+    }
+
+    private func bookmarkMatchingCurrentPosition(locatorData: Data?) -> ReaderBookmark? {
+        guard let locatorData,
+              let locator = try? LocatorCoding.decode(locatorData)
+        else {
+            return nil
+        }
+        return bookmarks.first { bookmark in
+            guard let bookmarkLocator = try? LocatorCoding.decode(bookmark.locatorData) else {
+                return false
+            }
+            return bookmarkLocator.matchesReaderPage(locator)
+        }
+    }
+
+    private func syncListeningStore(with state: ReaderListeningState) {
+        listeningState = state
+        guard let book else {
+            return
+        }
+        Self.syncListeningStore(
+            container: container,
+            book: book,
+            state: state,
+            fallbackSectionTitle: currentSectionTitle
+        )
+    }
+
+    private static func syncListeningStore(
+        container: AppContainer,
+        book: BookRecord,
+        state: ReaderListeningState,
+        fallbackSectionTitle: String
+    ) {
+        guard state.isActive else {
+            container.listeningStore.finish(bookID: book.id)
+            return
+        }
+        container.listeningStore.update(
+            book: book,
+            locatorData: state.locatorData ?? book.readingLocatorData,
+            fallbackSectionTitle: state.chapterTitle.trimmingCharacters(in: .whitespacesAndNewlines).readerTrimmedNonEmpty
+                ?? fallbackSectionTitle,
+            progress: book.readingProgress,
+            isPlaying: state.isPlaying,
+            remainingSeconds: state.remainingSeconds
+        )
     }
 
     private func updateCurrentPage(from locatorData: Data?, progress: Double) {
@@ -406,6 +594,29 @@ private extension String {
 }
 
 private extension Locator {
+    func matchesReaderPage(_ other: Locator) -> Bool {
+        guard href.string.withoutFragment == other.href.string.withoutFragment else {
+            return false
+        }
+
+        if let position = locations.position,
+           let otherPosition = other.locations.position {
+            return position == otherPosition
+        }
+
+        if let totalProgression = locations.totalProgression,
+           let otherTotalProgression = other.locations.totalProgression {
+            return abs(totalProgression - otherTotalProgression) <= 0.002
+        }
+
+        if let progression = locations.progression,
+           let otherProgression = other.locations.progression {
+            return abs(progression - otherProgression) <= 0.015
+        }
+
+        return false
+    }
+
     var readerBookmarkSnippet: String? {
         let sanitizedText = text.sanitized()
         let snippet = [

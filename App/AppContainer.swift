@@ -1,5 +1,152 @@
 import Foundation
 import SwiftData
+@preconcurrency import ReadiumShared
+
+struct ListeningSessionSnapshot: Identifiable, Equatable {
+    let bookID: UUID
+    var bookTitle: String
+    var author: String
+    var coverRelativePath: String?
+    var chapterTitle: String
+    var remainingSeconds: Int
+    var isPlaying: Bool
+
+    var id: UUID { bookID }
+
+    var remainingTimeText: String {
+        let seconds = max(remainingSeconds, 0)
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+@MainActor
+@Observable
+final class ListeningSessionStore {
+    var session: ListeningSessionSnapshot?
+    @ObservationIgnored
+    private var onTogglePlayback: (() -> Void)?
+    @ObservationIgnored
+    private var onStopPlayback: (() -> Void)?
+
+    func start(
+        book: BookRecord,
+        locatorData: Data?,
+        fallbackSectionTitle: String? = nil,
+        progress: Double? = nil,
+        isPlaying: Bool = true,
+        remainingSeconds: Int? = nil,
+        onTogglePlayback: (() -> Void)? = nil,
+        onStopPlayback: (() -> Void)? = nil
+    ) {
+        let chapter = Self.chapterEstimate(
+            book: book,
+            locatorData: locatorData,
+            fallbackSectionTitle: fallbackSectionTitle,
+            progress: progress
+        )
+        session = ListeningSessionSnapshot(
+            bookID: book.id,
+            bookTitle: book.title,
+            author: book.displayAuthor,
+            coverRelativePath: book.coverRelativePath,
+            chapterTitle: chapter.title,
+            remainingSeconds: remainingSeconds ?? chapter.remainingSeconds,
+            isPlaying: isPlaying
+        )
+        if let onTogglePlayback {
+            self.onTogglePlayback = onTogglePlayback
+        }
+        if let onStopPlayback {
+            self.onStopPlayback = onStopPlayback
+        }
+    }
+
+    func update(
+        book: BookRecord,
+        locatorData: Data?,
+        fallbackSectionTitle: String? = nil,
+        progress: Double? = nil,
+        isPlaying: Bool? = nil,
+        remainingSeconds: Int? = nil
+    ) {
+        guard session?.bookID == book.id else {
+            return
+        }
+        let chapter = Self.chapterEstimate(
+            book: book,
+            locatorData: locatorData,
+            fallbackSectionTitle: fallbackSectionTitle,
+            progress: progress
+        )
+        session?.bookTitle = book.title
+        session?.author = book.displayAuthor
+        session?.coverRelativePath = book.coverRelativePath
+        session?.chapterTitle = chapter.title
+        session?.remainingSeconds = remainingSeconds ?? chapter.remainingSeconds
+        if let isPlaying {
+            session?.isPlaying = isPlaying
+        }
+    }
+
+    func togglePlayback() {
+        if let onTogglePlayback {
+            onTogglePlayback()
+        } else {
+            session?.isPlaying.toggle()
+        }
+    }
+
+    func stop() {
+        let stopPlayback = onStopPlayback
+        clear()
+        stopPlayback?()
+    }
+
+    func finish(bookID: UUID) {
+        guard session?.bookID == bookID else {
+            return
+        }
+        clear()
+    }
+
+    private func clear() {
+        session = nil
+        onTogglePlayback = nil
+        onStopPlayback = nil
+    }
+
+    private static func chapterEstimate(
+        book: BookRecord,
+        locatorData: Data?,
+        fallbackSectionTitle: String?,
+        progress: Double?
+    ) -> (title: String, remainingSeconds: Int) {
+        let locator = locatorData.flatMap { try? LocatorCoding.decode($0) }
+        let title = locator?.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? fallbackSectionTitle?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? "正文"
+        let chapterProgress = (locator?.locations.progression
+            ?? progress
+            ?? book.readingProgress
+        )
+        .clamped(to: 0 ... 1)
+        let estimatedChapterSeconds = 12 * 60
+        let remaining = Int((1 - chapterProgress) * Double(estimatedChapterSeconds)).roundedUpToMinuteFloor
+        return (title, remaining)
+    }
+}
+
+private extension Int {
+    var roundedUpToMinuteFloor: Int {
+        Swift.max(60, self)
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
 
 @MainActor
 @Observable
@@ -15,6 +162,7 @@ final class AppContainer {
     let preferencesStore: ReaderPreferencesStore
     let libraryGroupStore: LibraryGroupStore
     let readerBookmarkStore: ReaderBookmarkStore
+    let listeningStore: ListeningSessionStore
 
     init(modelContainer: ModelContainer, fileStore: BookFileStore) {
         let modelContext = ModelContext(modelContainer)
@@ -29,6 +177,7 @@ final class AppContainer {
         let preferencesStore = ReaderPreferencesStore()
         let libraryGroupStore = LibraryGroupStore()
         let readerBookmarkStore = ReaderBookmarkStore()
+        let listeningStore = ListeningSessionStore()
         let wifiTransferService = WiFiTransferService(
             fileStore: fileStore,
             importService: importService,
@@ -95,6 +244,7 @@ final class AppContainer {
         self.preferencesStore = preferencesStore
         self.libraryGroupStore = libraryGroupStore
         self.readerBookmarkStore = readerBookmarkStore
+        self.listeningStore = listeningStore
 
         prepareUITestingStateIfNeeded()
     }
