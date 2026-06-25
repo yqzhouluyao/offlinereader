@@ -1,0 +1,90 @@
+<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="pub-id" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"
+      xmlns:dc-alias="http://purl.org/dc/elements/1.1/"
+      xmlns:dcterms="http://purl.org/dc/terms/"
+      xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>Contributors Test</dc:title>
+
+    <!-- ── EPUB 2.x: dc:creator with opf:role attribute ────────────────────────── -->
+
+    <!-- No role: defaults to author -->
+    <dc:creator>Author 1</dc:creator>
+    <!-- Known role on dc:creator overrides the author default -->
+    <dc:creator opf:role="pbl">Creator As Publisher</dc:creator>
+    <!-- Unknown role on dc:creator still falls back to author; role is preserved on the object -->
+    <dc:creator opf:role="xyz">Creator Unknown Role</dc:creator>
+
+    <!-- ── EPUB 2.x: dc:contributor with opf:role attribute ─────────────────────── -->
+
+    <!-- No role: defaults to contributor -->
+    <dc:contributor>Contributor 1</dc:contributor>
+    <!-- Each known MARC relator code routes the contributor to the correct bucket -->
+    <dc:contributor opf:role="aut">Author 2</dc:contributor>
+    <dc:contributor opf:role="pbl">Publisher 2</dc:contributor>
+    <dc:contributor opf:role="trl">Translator 1</dc:contributor>
+    <dc:contributor opf:role="edt">Editor 1</dc:contributor>
+    <dc:contributor opf:role="art">Artist 1</dc:contributor>
+    <!-- opf:file-as is carried through to sortAs -->
+    <dc:contributor opf:role="ill" opf:file-as="Illustrator, The First">Illustrator 1</dc:contributor>
+    <dc:contributor opf:role="clr">Colorist 1</dc:contributor>
+    <dc:contributor opf:role="nrt">Narrator 1</dc:contributor>
+    <!-- Unknown role: stays in contributor bucket; role is preserved on the object -->
+    <dc:contributor opf:role="unknown">Unknown 1</dc:contributor>
+
+    <!-- ── EPUB 2.x: dc:publisher ──────────────────────────────────────────────── -->
+
+    <!-- dc:publisher is always routed to publisher, regardless of any role -->
+    <dc:publisher>Publisher 1</dc:publisher>
+
+    <!-- ── EPUB 3.x: dc:* elements with meta refines ───────────────────────────── -->
+
+    <!-- No refine: same defaults as EPUB 2.x -->
+    <dc:creator id="creator-a">Author A</dc:creator>
+    <dc:contributor id="contributor-a">Contributor A</dc:contributor>
+    <!-- Known role via refine routes to the correct bucket -->
+    <dc:contributor id="author-b">Author B</dc:contributor>
+    <meta refines="#author-b" property="role">aut</meta>
+    <!-- Known role refine on dc:creator overrides the author default -->
+    <dc:creator id="creator-b">Creator B As Publisher</dc:creator>
+    <meta refines="#creator-b" property="role">pbl</meta>
+    <!-- dc:publisher with a conflicting role refine is still always a publisher -->
+    <dc:publisher id="publisher-a">Publisher A</dc:publisher>
+    <meta refines="#publisher-a" property="role">aut</meta>
+    <!-- Unknown role via refine: stays in contributor bucket; role is preserved on the object -->
+    <dc:contributor id="unknown-a">Unknown A</dc:contributor>
+    <meta refines="#unknown-a" property="role">unknown</meta>
+    <!-- Only the first role refine is used when multiple are present -->
+    <dc:contributor id="multi-role">Author Multi-Role</dc:contributor>
+    <meta refines="#multi-role" property="role">aut</meta>
+    <meta refines="#multi-role" property="role">pbl</meta>
+
+    <!-- ── EPUB 3.x: dcterms: meta elements ────────────────────────────────────── -->
+
+    <!-- Default routing mirrors dc:* behaviour -->
+    <meta property="dcterms:creator">Author C</meta>
+    <meta property="dcterms:contributor">Contributor B</meta>
+    <!-- dcterms:publisher with a conflicting role refine is still always a publisher -->
+    <meta id="publisher-b" property="dcterms:publisher">Publisher B</meta>
+    <meta refines="#publisher-b" property="role">aut</meta>
+
+    <!-- ── EPUB 3.x: media:narrator ────────────────────────────────────────────── -->
+
+    <!-- media:narrator is always routed to narrator -->
+    <meta property="media:narrator">Narrator 2</meta>
+
+    <!-- ── Namespace variants ──────────────────────────────────────────────────── -->
+
+    <!-- dc:creator without a namespace prefix is recognised as a creator -->
+    <creator xmlns="http://purl.org/dc/elements/1.1/">Author NS-Default</creator>
+    <!-- dc:creator with a non-standard namespace prefix is recognised as a creator -->
+    <dc-alias:creator>Author NS-Alias</dc-alias:creator>
+
+  </metadata>
+  <manifest>
+    <item id="titlepage" href="titlepage.xhtml" media-type="application/xhtml+xml" />
+  </manifest>
+  <spine>
+    <itemref idref="titlepage"/>
+  </spine>
+</package>

@@ -1,0 +1,184 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  xcode_16_4:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests --enable-code-coverage 
+      - name: Test
+        run: swift test --skip-build --enable-code-coverage --xunit-output result.xml
+        timeout-minutes: 1
+      - name: Gather code coverage
+        run: xcrun llvm-cov export -format="lcov" .build/debug/FlyingFoxPackageTests.xctest/Contents/MacOS/FlyingFoxPackageTests -instr-profile .build/debug/codecov/default.profdata > coverage_report.lcov
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage_report.lcov
+      - name: Upload Junit
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./result.xml
+      - name: 📄 Summary
+        uses: ./.github/actions/test-summary
+        with:
+          junit: result-swift-testing.xml
+          coverage: .build/debug/codecov/FlyingFox.json
+
+  xcode_26:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.0.app/Contents/Developer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
+
+  xcode_16_2:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
+
+  xcode_15_4:
+    runs-on: macos-14
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_15.4.app/Contents/Developer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
+
+  linux_swift_5_10:
+    runs-on: ubuntu-latest
+    container: swift:5.10
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
+
+  linux_swift_6_0:
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
+
+  linux_swift_6_1:
+    runs-on: ubuntu-latest
+    container: swift:6.1.2
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
+
+  linux_swift_6_2:
+    runs-on: ubuntu-latest
+    container: swiftlang/swift:nightly-6.2-noble
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build
+
+  linux_swift_6_1_musl:
+    runs-on: ubuntu-latest
+    container: swift:6.1.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: SDK List Pre
+        run: swift sdk list
+      - name: Install SDK
+        run: swift sdk install https://download.swift.org/swift-6.1.2-release/static-sdk/swift-6.1.2-RELEASE/swift-6.1.2-RELEASE_static-linux-0.0.1.artifactbundle.tar.gz --checksum df0b40b9b582598e7e3d70c82ab503fd6fbfdff71fd17e7f1ab37115a0665b3b
+      - name: SDK List Post
+        run: swift sdk list
+      - name: Build
+        run: swift build --swift-sdk x86_64-swift-linux-musl
+
+  linux_swift_6_1_android:
+    runs-on: ubuntu-latest
+    container: swift:6.1.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Version
+        run: swift --version
+      - name: Install SDK
+        run: swift sdk install https://github.com/finagolfin/swift-android-sdk/releases/download/6.1.2/swift-6.1.2-RELEASE-android-24-0.1.artifactbundle.tar.gz --checksum 6d817c947870e8c85e6cab9a6ab6d7313b50fa5a20b890c396723c0b16ab32d9
+      - name: Build
+        run: swift build --swift-sdk aarch64-unknown-linux-android24
+
+  windows_swift_6_2:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Swift
+        uses: SwiftyLab/setup-swift@latest
+        with:
+          swift-version: "6.2"
+      - name: Version
+        run: swift --version
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: swift test --skip-build

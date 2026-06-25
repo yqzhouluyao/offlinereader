@@ -1,0 +1,12 @@
+TestApp.xcodeproj
+TestApp.xcworkspace
+TestApp.xctestplan
+project.yml
+# IntelliJ AppCode
+.idea
+
+Pods/
+Podfile
+Podfile.lock
+
+R2LCPClient/

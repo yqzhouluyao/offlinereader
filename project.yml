@@ -1,0 +1,90 @@
+name: OfflineReader
+options:
+  bundleIdPrefix: com.luyaolab
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+packages:
+  Readium:
+    path: Vendor/readium-swift-toolkit-3.9.0
+  FlyingFox:
+    path: Vendor/FlyingFox-0.26.0
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    SWIFT_STRICT_CONCURRENCY: complete
+    IPHONEOS_DEPLOYMENT_TARGET: 18.0
+    MARKETING_VERSION: 1.0
+    CURRENT_PROJECT_VERSION: 1
+targets:
+  OfflineReader:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Core
+      - Data
+      - Services
+      - Features
+      - Resources
+    resources:
+      - Resources
+    dependencies:
+      - package: Readium
+        product: ReadiumShared
+      - package: Readium
+        product: ReadiumStreamer
+      - package: Readium
+        product: ReadiumNavigator
+      - package: FlyingFox
+        product: FlyingFox
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.luyaolab.offlinereader
+        INFOPLIST_FILE: App/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_STYLE: Automatic
+        SUPPORTS_MACCATALYST: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        ENABLE_TESTABILITY: YES
+  OfflineReaderTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - OfflineReaderTests
+      - path: Vendor/readium-swift-toolkit-3.9.0/Tests/Publications/Publications/childrens-literature.epub
+        buildPhase: resources
+    dependencies:
+      - target: OfflineReader
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.luyaolab.offlinereader.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: 6.0
+        SWIFT_STRICT_CONCURRENCY: complete
+  OfflineReaderUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - OfflineReaderUITests
+    dependencies:
+      - target: OfflineReader
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.luyaolab.offlinereader.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: 6.0
+        SWIFT_STRICT_CONCURRENCY: complete
+schemes:
+  OfflineReader:
+    build:
+      targets:
+        OfflineReader: all
+        OfflineReaderTests: [test]
+        OfflineReaderUITests: [test]
+    test:
+      targets:
+        - OfflineReaderTests
+        - OfflineReaderUITests
+      gatherCoverageData: true

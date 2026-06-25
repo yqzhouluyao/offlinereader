@@ -1,0 +1,410 @@
+//
+//  Copyright 2026 Readium Foundation. All rights reserved.
+//  Use of this source code is governed by the BSD-style license
+//  available in the top-level LICENSE file of the project.
+//
+
+import ReadiumFuzi
+import ReadiumShared
+@testable import ReadiumStreamer
+import XCTest
+
+class EPUBMetadataParserTests: XCTestCase {
+    let fixtures = Fixtures(path: "OPF")
+
+    func testParseFullMetadata() throws {
+        let sut = try parseMetadata("full-metadata")
+
+        XCTAssertEqual(sut, Metadata(
+            identifier: "urn:uuid:7408D53A-5383-40AA-8078-5256C872AE41",
+            conformsTo: [.epub],
+            title: "Alice's Adventures in Wonderland",
+            subtitle: "Alice returns to the magical world from her childhood adventure",
+            accessibility: Accessibility(
+                certification: Accessibility.Certification(
+                    certifiedBy: "EDRLab"
+                )
+            ),
+            modified: "2012-04-02T12:47:00Z".dateFromISO8601,
+            published: "1865-07-04".dateFromISO8601,
+            languages: ["en-GB", "en"],
+            subjects: [
+                Subject(name: "fiction"),
+                Subject(name: "classic", scheme: "thema", code: "DCA"),
+            ],
+            authors: [Contributor(name: "Lewis Carroll")],
+            publishers: [Contributor(name: "D. Appleton and Co")],
+            layout: .fixed,
+            readingProgression: .rtl,
+            description: "The book description.",
+            numberOfPages: 42,
+            otherMetadata: [
+                "http://purl.org/dc/terms/source": .array([
+                    .string("Feedbooks"),
+                    .object([
+                        "@value": .string("Web"),
+                        "http://my.url/#scheme": .string("http"),
+                    ]),
+                    .string("Internet"),
+                ]),
+                "http://purl.org/dc/terms/rights": .string("Public Domain"),
+                "http://idpf.org/epub/vocab/package/#type": .string("article"),
+                "http://my.url/#customProperty": .object([
+                    "@value": .string("Custom property"),
+                    "http://my.url/#refine1": .string("Refine 1"),
+                    "http://my.url/#refine2": .string("Refine 2"),
+                ]),
+                "http://purl.org/dc/terms/format": .string("application/epub+zip"),
+                "http://www.idpf.org/vocab/rendition/#flow": .string("scrolled-doc"),
+                "http://www.idpf.org/vocab/rendition/#orientation": .string("landscape"),
+                "http://www.idpf.org/vocab/rendition/#spread": .string("both"),
+            ]
+        ))
+    }
+
+    func testParseMinimalMetadata() throws {
+        let sut = try parseMetadata("minimal")
+
+        XCTAssertEqual(sut, Metadata(
+            conformsTo: [.epub],
+            title: "Alice's Adventures in Wonderland",
+            layout: .reflowable
+        ))
+    }
+
+    func testParseWithNamespacesPrefix() throws {
+        let sut = try parseMetadata("with-namespaces-prefix")
+
+        XCTAssertEqual(sut, Metadata(
+            conformsTo: [.epub],
+            title: "Alice's Adventures in Wonderland",
+            layout: .reflowable
+        ))
+    }
+
+    /// Old EPUB 2 files sometimes contain the `dc` tags under `dc-metadata` and `x-metadata`.
+    /// See http://idpf.org/epub/20/spec/OPF_2.0_final_spec.html#Section2.2
+    func testParseUnderDCMetadataElement() throws {
+        let sut = try parseMetadata("dc-metadata")
+
+        XCTAssertEqual(sut.identifier, "urn:uuid:1a16ce38-82bd-4e9b-861e-773c2e787a50")
+        XCTAssertEqual(sut.title, "Alice's Adventures in Wonderland")
+        XCTAssertEqual(sut.modified, "2012-04-02T12:47:00Z".dateFromISO8601)
+        XCTAssertEqual(sut.authors, [Contributor(name: "Lewis Carroll")])
+    }
+
+    func testParseMainTitle() throws {
+        let sut = try parseMetadata("title-main")
+        XCTAssertEqual(sut.title, "Main title takes precedence")
+    }
+
+    func testParseLocalizedTitles() throws {
+        let sut = try parseMetadata("title-localized")
+        XCTAssertEqual(sut.localizedTitle, try LocalizedString(json: [
+            "en": "Alice's Adventures in Wonderland",
+            "fr": "Les Aventures d'Alice au pays des merveilles",
+        ]))
+        XCTAssertEqual(sut.localizedSubtitle, try LocalizedString(json: [
+            "en-GB": "Alice returns to the magical world from her childhood adventure",
+            "fr": "Alice retourne dans le monde magique de ses aventures d'enfance.",
+        ]))
+    }
+
+    func testParseMultipleSubtitles() throws {
+        let sut = try parseMetadata("title-multiple-subtitles")
+        XCTAssertEqual(sut.subtitle, "Subtitle 2")
+    }
+
+    func testParseSortAsEPUB3() throws {
+        let sut = try parseMetadata("sortAs-epub3")
+        XCTAssertEqual(sut.sortAs, "Aventures")
+    }
+
+    func testParseSortAsEPUB2() throws {
+        let sut = try parseMetadata("sortAs-epub2")
+        XCTAssertEqual(sut.sortAs, "Aventures")
+    }
+
+    func testParseUniqueIdentifier() throws {
+        let sut = try parseMetadata("identifier-unique")
+        XCTAssertEqual(sut.identifier, "urn:uuid:2")
+    }
+
+    func testParseDateEPUB3() throws {
+        let sut = try parseMetadata("dates-epub3")
+        XCTAssertEqual(sut.published, "1865-07-04".dateFromISO8601)
+        XCTAssertEqual(sut.modified, "2012-04-02T12:47:00Z".dateFromISO8601)
+    }
+
+    func testParseDateEPUB2() throws {
+        let sut = try parseMetadata("dates-epub2")
+        XCTAssertEqual(sut.published, "1865-07-04".dateFromISO8601)
+        XCTAssertEqual(sut.modified, "2012-04-02T12:47:00Z".dateFromISO8601)
+    }
+
+    func testParseContributors() throws {
+        let sut = try parseMetadata("contributors")
+
+        XCTAssertEqual(sut, Metadata(
+            conformsTo: [.epub],
+            title: "Contributors Test",
+            authors: [
+                // EPUB 2.x dc:creator: no role → author default
+                Contributor(name: "Author 1"),
+                // EPUB 2.x dc:creator: unknown role still falls back to author; role preserved
+                Contributor(name: "Creator Unknown Role", role: "xyz"),
+                // EPUB 3.x dc:creator: no refine → author default
+                Contributor(name: "Author A"),
+                // EPUB 3.x dcterms:creator: no refine → author default
+                Contributor(name: "Author C"),
+                // Namespace variants are recognised as creators
+                Contributor(name: "Author NS-Default"),
+                Contributor(name: "Author NS-Alias"),
+                // EPUB 2.x dc:contributor: opf:role="aut" routes to author
+                Contributor(name: "Author 2"),
+                // EPUB 3.x dc:contributor: role refine "aut" routes to author
+                Contributor(name: "Author B"),
+                // Only the first role refine is used; "aut" wins over "pbl"
+                Contributor(name: "Author Multi-Role"),
+            ],
+            translators: [Contributor(name: "Translator 1")],
+            editors: [Contributor(name: "Editor 1")],
+            artists: [Contributor(name: "Artist 1")],
+            illustrators: [
+                // opf:file-as is carried through to sortAs
+                Contributor(name: "Illustrator 1", sortAs: "Illustrator, The First"),
+            ],
+            colorists: [Contributor(name: "Colorist 1")],
+            narrators: [
+                // EPUB 2.x dc:contributor: opf:role="nrt"
+                Contributor(name: "Narrator 1"),
+                // EPUB 3.x media:narrator element
+                Contributor(name: "Narrator 2"),
+            ],
+            contributors: [
+                // dc:contributor with no role
+                Contributor(name: "Contributor 1"),
+                // dc:contributor with unknown role; role is preserved on the object
+                Contributor(name: "Unknown 1", role: "unknown"),
+                // EPUB 3.x dc:contributor with no refine
+                Contributor(name: "Contributor A"),
+                // EPUB 3.x dc:contributor with unknown role refine; role preserved
+                Contributor(name: "Unknown A", role: "unknown"),
+                // EPUB 3.x dcterms:contributor with no refine
+                Contributor(name: "Contributor B"),
+            ],
+            publishers: [
+                // EPUB 2.x dc:creator: known role "pbl" overrides author default
+                Contributor(name: "Creator As Publisher"),
+                // EPUB 3.x dc:creator: role refine "pbl" overrides author default
+                Contributor(name: "Creator B As Publisher"),
+                // EPUB 2.x dc:publisher: always publisher
+                Contributor(name: "Publisher 1"),
+                // EPUB 3.x dc:publisher with conflicting role refine is still publisher
+                Contributor(name: "Publisher A"),
+                // EPUB 3.x dcterms:publisher with conflicting role refine is still publisher
+                Contributor(name: "Publisher B"),
+                // EPUB 2.x dc:contributor: opf:role="pbl" routes to publisher
+                Contributor(name: "Publisher 2"),
+            ],
+            layout: .reflowable
+        ))
+    }
+
+    func testParseSingleSubjects() throws {
+        let sut = try parseMetadata("subjects-single")
+        XCTAssertEqual(sut.subjects, [
+            Subject(name: "apple", scheme: "thema", code: "DCA"),
+            Subject(name: "banana", scheme: "thema", code: "DCA"),
+            Subject(name: "pear", scheme: "thema", code: "DCA"),
+        ])
+    }
+
+    func testParseMultipleSubjects() throws {
+        let sut = try parseMetadata("subjects-multiple")
+        XCTAssertEqual(sut.subjects, [
+            Subject(name: "fiction"),
+            Subject(name: "apple; banana,  pear", scheme: "thema", code: "DCA"),
+        ])
+    }
+
+    func testParseLocalizedSubjects() throws {
+        let sut = try parseMetadata("subjects-localized")
+        XCTAssertEqual(sut.subjects, [
+            Subject(name: LocalizedString.localized([
+                "en": "fantasy",
+                "fr": "fantastique",
+            ])),
+        ])
+    }
+
+    func testParseCollectionsEPUB2() throws {
+        let sut = try parseMetadata("collections-epub2")
+        XCTAssertEqual(sut.belongsToSeries, [
+            Metadata.Collection(name: "Classic Anthology", position: 1.5),
+        ])
+        XCTAssertEqual(sut.belongsToCollections, [])
+    }
+
+    func testParseCollectionsEPUB3() throws {
+        let sut = try parseMetadata("collections-epub3")
+        XCTAssertEqual(sut.belongsToSeries, [
+            Metadata.Collection(name: LocalizedString.localized([
+                "en": "Series A",
+                "fr": "Série A",
+            ]), position: 2),
+            Metadata.Collection(name: "Series B"),
+        ])
+        XCTAssertEqual(sut.belongsToCollections, [
+            Metadata.Collection(name: "Collection A", identifier: "col-a", sortAs: "ColA", position: 1.5),
+            Metadata.Collection(name: "Collection B"),
+        ])
+    }
+
+    func testParseReadingProgressionFromSpine() throws {
+        let sut = try parseMetadata("progression-spine")
+        XCTAssertEqual(sut.readingProgression, .rtl)
+    }
+
+    func testParseReadingProgressionFromReadingOrder() throws {
+        let sut = try parseMetadata("progression-readingOrder")
+        XCTAssertEqual(sut.readingProgression, .rtl)
+    }
+
+    func testParseReadingProgressionLTR() throws {
+        let sut = try parseMetadata("progression-ltr")
+        XCTAssertEqual(sut.readingProgression, .ltr)
+    }
+
+    func testParseReadingProgressionRTL() throws {
+        let sut = try parseMetadata("progression-rtl")
+        XCTAssertEqual(sut.readingProgression, .rtl)
+    }
+
+    func testParseReadingProgressionDefault() throws {
+        let sut = try parseMetadata("progression-default")
+        XCTAssertEqual(sut.readingProgression, .auto)
+    }
+
+    func testParseReadingProgressionWhenNoneIsDefined() throws {
+        let sut = try parseMetadata("progression-none")
+        XCTAssertEqual(sut.readingProgression, .auto)
+    }
+
+    func testParseRenditionFallbackWithDisplayOptions() throws {
+        let sut = try parseMetadata("minimal", displayOptions: "displayOptions")
+        XCTAssertEqual(sut.layout, .fixed)
+    }
+
+    func testParseEPUB2Accessibility() throws {
+        let sut = try parseMetadata("accessibility-epub2")
+        XCTAssertEqual(
+            sut.accessibility,
+            Accessibility(
+                conformsTo: [.epubA11y10WCAG20A, .epubA11y11WCAG20AAA, .epubA11y11WCAG21AA],
+                certification: Accessibility.Certification(
+                    certifiedBy: "Accessibility Testers Group",
+                    credential: "DAISY OK",
+                    report: "https://example.com/a11y-report/"
+                ),
+                summary: "The publication contains structural and page navigation.",
+                accessModes: [.textual, .visual],
+                accessModesSufficient: [[.textual], [.textual, .visual]],
+                features: [.structuralNavigation, .alternativeText],
+                hazards: [.motionSimulation, .noSoundHazard],
+                exemptions: [.eaaMicroenterprise, .eaaFundamentalAlteration, .eaaDisproportionateBurden]
+            )
+        )
+        // Checks that the a11y metadata are not added to otherMetadata.
+        XCTAssertTrue(sut.otherMetadata.isEmpty)
+    }
+
+    func testParseEPUB3Accessibility() throws {
+        let sut = try parseMetadata("accessibility-epub3")
+        XCTAssertEqual(
+            sut.accessibility,
+            Accessibility(
+                conformsTo: [.epubA11y10WCAG20A, .epubA11y11WCAG20AAA, .epubA11y11WCAG21AA],
+                certification: Accessibility.Certification(
+                    certifiedBy: "Accessibility Testers Group",
+                    credential: "DAISY OK",
+                    report: "https://example.com/a11y-report/"
+                ),
+                summary: "The publication contains structural and page navigation.",
+                accessModes: [.textual, .visual],
+                accessModesSufficient: [[.textual], [.textual, .visual]],
+                features: [.structuralNavigation, .alternativeText],
+                hazards: [.motionSimulation, .noSoundHazard],
+                exemptions: [.eaaMicroenterprise, .eaaFundamentalAlteration, .eaaDisproportionateBurden]
+            )
+        )
+        // Checks that the a11y metadata are not added to otherMetadata.
+        XCTAssertTrue(sut.otherMetadata.isEmpty)
+    }
+
+    func testParseEPUB2TDM() throws {
+        let sut = try parseMetadata("tdm-epub2")
+        XCTAssertEqual(
+            sut.tdm,
+            try TDM(
+                reservation: .all,
+                policy: XCTUnwrap(HTTPURL(string: "https://provider.com/policies/policy.json"))
+            )
+        )
+    }
+
+    func testParseEPUB3TDM() throws {
+        let sut = try parseMetadata("tdm-epub3")
+        XCTAssertEqual(
+            sut.tdm,
+            try TDM(
+                reservation: .all,
+                policy: XCTUnwrap(HTTPURL(string: "https://provider.com/policies/policy.json"))
+            )
+        )
+    }
+
+    // MARK: - Media Overlays
+
+    func testParseMediaOverlaysDuration() throws {
+        let sut = try parseMetadata("media-overlays")
+        // 1h 32m 29s = 3600 + 1949 = 5549
+        XCTAssertEqual(sut.duration, 5549.0)
+    }
+
+    func testParseMediaOverlaysActiveClass() throws {
+        let sut = try parseMetadata("media-overlays")
+        XCTAssertEqual(sut.mediaOverlay?.activeClass, "-epub-media-overlay-active")
+    }
+
+    func testParseMediaOverlaysPlaybackActiveClass() throws {
+        let sut = try parseMetadata("media-overlays")
+        XCTAssertEqual(sut.mediaOverlay?.playbackActiveClass, "-epub-media-overlay-playing")
+    }
+
+    func testMediaOverlayNotInRawOtherMetadata() throws {
+        let sut = try parseMetadata("media-overlays")
+        // active-class and playback-active-class should be consumed, not in otherMetadata
+        let mediaVocab = "http://www.idpf.org/epub/vocab/overlays/#"
+        XCTAssertNil(sut.otherMetadata["\(mediaVocab)active-class"])
+        XCTAssertNil(sut.otherMetadata["\(mediaVocab)playback-active-class"])
+        XCTAssertNil(sut.otherMetadata["\(mediaVocab)duration"])
+        // The synthesized mediaOverlay key must be stored in otherMetadata
+        XCTAssertNotNil(sut.otherMetadata["mediaOverlay"])
+    }
+
+    // MARK: - Toolkit
+
+    func parseMetadata(_ name: String, displayOptions: String? = nil) throws -> Metadata {
+        func parseDocument(named name: String, type: String) throws -> ReadiumFuzi.XMLDocument {
+            try XMLDocument(data: fixtures.data(at: "\(name).\(type)"))
+        }
+
+        let document = try parseDocument(named: name, type: "opf")
+        return try EPUBMetadataParser(
+            document: document,
+            displayOptions: displayOptions.map { try parseDocument(named: $0, type: "xml") },
+            metas: OPFMetaList(document: document)
+        ).parse()
+    }
+}
