@@ -184,6 +184,8 @@ public class PublicationSpeechSynthesizer: Loggable {
         AudioSession.shared.start(with: audioSessionUser, isPlaying: false)
 
         currentTask?.cancel()
+        lastPrefetchedUtteranceKey = nil
+        pendingStartLocator = startLocator
         publicationIterator = publication.content(from: startLocator)?.iterator()
         currentTask = Task {
             await playNextUtterance(.forward)
@@ -195,6 +197,7 @@ public class PublicationSpeechSynthesizer: Loggable {
     /// Use `start()` to restart it.
     public func stop() {
         currentTask?.cancel()
+        lastPrefetchedUtteranceKey = nil
         state = .stopped
         publicationIterator = nil
     }
@@ -248,11 +251,19 @@ public class PublicationSpeechSynthesizer: Loggable {
     private var publicationIterator: ContentIterator? {
         didSet {
             utterances = CursorList()
+            queuedUtteranceBatches.removeAll()
+            lastPrefetchedUtteranceKey = nil
         }
     }
 
+    private var pendingStartLocator: Locator?
+    private var queuedUtteranceBatches: [[Utterance]] = []
+
     /// Utterances for the current publication `ContentElement` item.
     private var utterances: CursorList<Utterance> = CursorList()
+    private var lastPrefetchedUtteranceKey: String?
+    private var consecutivePlaybackFailures = 0
+    private static let maximumConsecutivePlaybackFailures = 3
 
     /// Plays the next utterance in the given `direction`.
     private func playNextUtterance(_ direction: Direction) async {
@@ -265,6 +276,12 @@ public class PublicationSpeechSynthesizer: Loggable {
 
     /// Plays the given `utterance` with the TTS `engine`.
     private func play(_ utterance: Utterance) async {
+        await preloadForwardUtteranceBatches(minimumUpcomingUtteranceCount: Self.prefetchUtteranceLimit)
+        guard !Task.isCancelled else {
+            return
+        }
+
+        prefetchUpcomingUtterances(afterStarting: utterance)
         state = .playing(utterance, range: nil)
 
         let result = await engine.speak(
@@ -301,12 +318,64 @@ public class PublicationSpeechSynthesizer: Loggable {
 
         switch result {
         case .success:
+            consecutivePlaybackFailures = 0
             await playNextUtterance(.forward)
         case let .failure(error):
-            state = .paused(utterance)
+            consecutivePlaybackFailures += 1
             await delegate?.publicationSpeechSynthesizer(self, utterance: utterance, didFailWithError: .engine(error))
+            guard consecutivePlaybackFailures < Self.maximumConsecutivePlaybackFailures else {
+                state = .paused(utterance)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            await playNextUtterance(.forward)
         }
     }
+
+    private func prefetchUpcomingUtterances(afterStarting utterance: Utterance) {
+        let key = "\(utterance.locator.href)#\(utterance.text)"
+        guard lastPrefetchedUtteranceKey != key else {
+            return
+        }
+        lastPrefetchedUtteranceKey = key
+
+        let upcoming = upcomingUtterances(limit: Self.prefetchUtteranceLimit)
+        guard !upcoming.isEmpty else {
+            return
+        }
+
+        engine.prefetch(
+            upcoming.map { utterance in
+                TTSUtterance(
+                    text: utterance.text,
+                    delay: 0,
+                    voiceOrLanguage: voiceOrLanguage(for: utterance)
+                )
+            }
+        )
+    }
+
+    private func upcomingUtterances(limit: Int) -> [Utterance] {
+        guard limit > 0 else {
+            return []
+        }
+
+        var upcoming = utterances.nextItems(limit: limit)
+        guard upcoming.count < limit else {
+            return upcoming
+        }
+
+        for batch in queuedUtteranceBatches {
+            let remaining = limit - upcoming.count
+            guard remaining > 0 else {
+                break
+            }
+            upcoming.append(contentsOf: batch.prefix(remaining))
+        }
+        return upcoming
+    }
+
+    private static let prefetchUtteranceLimit = 3
 
     /// Returns the user selected voice if it's compatible with the utterance language. Otherwise, falls back on
     /// the languages.
@@ -337,26 +406,74 @@ public class PublicationSpeechSynthesizer: Loggable {
 
     /// Loads the utterances for the next publication `ContentElement` item in the given `direction`.
     private func loadNextUtterances(_ direction: Direction) async -> Bool {
+        if direction == .forward, !queuedUtteranceBatches.isEmpty {
+            utterances = CursorList(list: queuedUtteranceBatches.removeFirst(), startIndex: 0)
+            await preloadForwardUtteranceBatches(minimumUpcomingUtteranceCount: Self.prefetchUtteranceLimit)
+            return true
+        }
+
         do {
             var nextUtterances: [Utterance] = []
+            var resolvedStartIndex: Int?
+            var bufferedUtteranceBatches: [[Utterance]] = []
+            var searchedStartElements = 0
             while nextUtterances.isEmpty {
                 guard let content = try await publicationIterator?.next(direction) else {
+                    if !bufferedUtteranceBatches.isEmpty {
+                        nextUtterances = bufferedUtteranceBatches.removeFirst()
+                        queuedUtteranceBatches = bufferedUtteranceBatches + queuedUtteranceBatches
+                        utterances = CursorList(list: nextUtterances, startIndex: 0)
+                        pendingStartLocator = nil
+                        return true
+                    }
                     return false
                 }
 
-                nextUtterances = try tokenize(content)
+                let contentUtterances = try tokenize(content)
                     .flatMap { utterances(for: $0) }
+
+                guard !contentUtterances.isEmpty else {
+                    continue
+                }
+
+                switch direction {
+                case .forward:
+                    if let pendingStartLocator {
+                        if let startIndex = preferredStartIndex(in: contentUtterances, for: pendingStartLocator) {
+                            nextUtterances = contentUtterances
+                            resolvedStartIndex = startIndex
+                            self.pendingStartLocator = nil
+                        } else {
+                            bufferedUtteranceBatches.append(contentUtterances)
+                            searchedStartElements += 1
+                            if searchedStartElements >= Self.maximumStartLocatorSearchElements {
+                                nextUtterances = bufferedUtteranceBatches.removeFirst()
+                                queuedUtteranceBatches = bufferedUtteranceBatches + queuedUtteranceBatches
+                                resolvedStartIndex = 0
+                                self.pendingStartLocator = nil
+                            }
+                        }
+                    } else {
+                        nextUtterances = contentUtterances
+                    }
+                case .backward:
+                    nextUtterances = contentUtterances
+                }
             }
 
-            utterances = CursorList(
-                list: nextUtterances,
-                startIndex: {
-                    switch direction {
-                    case .forward: return 0
-                    case .backward: return nextUtterances.count - 1
-                    }
-                }()
-            )
+            let startIndex: Int
+            switch direction {
+            case .forward:
+                startIndex = resolvedStartIndex ?? 0
+                pendingStartLocator = nil
+            case .backward:
+                startIndex = nextUtterances.count - 1
+            }
+
+            utterances = CursorList(list: nextUtterances, startIndex: startIndex)
+            if direction == .forward {
+                await preloadForwardUtteranceBatches(minimumUpcomingUtteranceCount: Self.prefetchUtteranceLimit)
+            }
 
             return true
 
@@ -365,6 +482,33 @@ public class PublicationSpeechSynthesizer: Loggable {
             return false
         }
     }
+
+    private static let maximumStartLocatorSearchElements = 80
+
+    private func preloadForwardUtteranceBatches(minimumUpcomingUtteranceCount: Int) async {
+        var searchedElements = 0
+
+        while upcomingUtterances(limit: minimumUpcomingUtteranceCount).count < minimumUpcomingUtteranceCount,
+              searchedElements < Self.maximumPrefetchContentElements {
+            searchedElements += 1
+            do {
+                guard let content = try await publicationIterator?.next(.forward) else {
+                    return
+                }
+                let contentUtterances = try tokenize(content)
+                    .flatMap { utterances(for: $0) }
+                guard !contentUtterances.isEmpty else {
+                    continue
+                }
+                queuedUtteranceBatches.append(contentUtterances)
+            } catch {
+                log(.error, error)
+                return
+            }
+        }
+    }
+
+    private static let maximumPrefetchContentElements = 4
 
     /// Splits a publication `ContentElement` item into smaller chunks using the provided tokenizer.
     ///
@@ -408,6 +552,84 @@ public class PublicationSpeechSynthesizer: Loggable {
         default:
             return []
         }
+    }
+
+    private func preferredStartIndex(in utterances: [Utterance], for locator: Locator) -> Int? {
+        let hints = [
+            locator.text.highlight,
+            locator.text.after,
+            locator.text.before,
+        ]
+        .compactMap { $0.map(Self.normalizedSpeechText(_:)) }
+        .filter { !$0.isEmpty }
+
+        guard !hints.isEmpty else {
+            return nil
+        }
+
+        let scored = utterances.enumerated().compactMap { index, utterance -> (index: Int, score: Int)? in
+            let text = Self.normalizedSpeechText(utterance.text)
+            guard !text.isEmpty else {
+                return nil
+            }
+            let score = hints.map { Self.speechStartMatchScore(utterance: text, hint: $0) }.max() ?? 0
+            return score > 0 ? (index, score) : nil
+        }
+
+        return scored.max { lhs, rhs in
+            if lhs.score == rhs.score {
+                return lhs.index > rhs.index
+            }
+            return lhs.score < rhs.score
+        }?.index
+    }
+
+    private static func normalizedSpeechText(_ text: String) -> String {
+        let skippedCharacters = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+        return String(String.UnicodeScalarView(
+            text.unicodeScalars.filter { !skippedCharacters.contains($0) }
+        ))
+        .lowercased()
+    }
+
+    private static func speechStartMatchScore(utterance: String, hint: String) -> Int {
+        if utterance.contains(hint) {
+            return hint.count + 200
+        }
+        if hint.contains(utterance) {
+            return utterance.count + 160
+        }
+
+        let maxLength = min(utterance.count, hint.count)
+        guard maxLength >= 2 else {
+            return 0
+        }
+
+        for length in stride(from: maxLength, through: 2, by: -1) {
+            let prefixEnd = hint.index(hint.startIndex, offsetBy: length)
+            let prefix = String(hint[..<prefixEnd])
+            if utterance.contains(prefix) {
+                return length + 120
+            }
+        }
+
+        if maxLength >= 4 {
+            var start = hint.startIndex
+            while start < hint.endIndex {
+                guard let end = hint.index(start, offsetBy: min(12, hint.distance(from: start, to: hint.endIndex)), limitedBy: hint.endIndex) else {
+                    break
+                }
+                let candidate = String(hint[start ..< end])
+                if candidate.count >= 4, utterance.contains(candidate) {
+                    return candidate.count + 40
+                }
+                start = hint.index(after: start)
+            }
+        }
+
+        return 0
     }
 
     // MARK: - Audio session

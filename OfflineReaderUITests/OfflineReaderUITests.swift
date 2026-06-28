@@ -80,4 +80,48 @@ final class OfflineReaderUITests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "library.listen.book.")).count, 0)
         XCTAssertFalse(app.buttons["listening.miniPlayer.playPause"].exists)
     }
+
+    @MainActor
+    func testLibraryBookMoreMenuPinsWithoutShareSheet() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-testing")
+        app.launchArguments.append("-ui-testing-seed-library")
+        app.launch()
+
+        let bookButtons = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "library.book."))
+        XCTAssertTrue(bookButtons.element(boundBy: 0).waitForExistence(timeout: 5))
+
+        let pinnedBadges = app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "library.book.pinned."))
+        XCTAssertEqual(pinnedBadges.count, 0)
+
+        let moreButtons = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "library.more.book."))
+        XCTAssertTrue(moreButtons.element(boundBy: 0).waitForExistence(timeout: 3))
+        moreButtons.element(boundBy: 0).tap()
+
+        XCTAssertTrue(app.buttons["置顶"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["移动到分组"].exists)
+        XCTAssertFalse(app.buttons["分享"].exists)
+
+        app.buttons["置顶"].tap()
+        XCTAssertTrue(pinnedBadges.element(boundBy: 0).waitForExistence(timeout: 3))
+    }
+
+    @MainActor
+    func testLibraryListRowsShowMoreMenu() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("-ui-testing")
+        app.launchArguments.append("-ui-testing-seed-library")
+        app.launch()
+
+        XCTAssertTrue(app.buttons["library.shelf.toggleMode"].waitForExistence(timeout: 5))
+        app.buttons["library.shelf.toggleMode"].tap()
+
+        let moreButtons = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "library.more.book."))
+        XCTAssertTrue(moreButtons.element(boundBy: 0).waitForExistence(timeout: 3))
+        moreButtons.element(boundBy: 0).tap()
+
+        XCTAssertTrue(app.buttons["置顶"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["移动到分组"].exists)
+        XCTAssertFalse(app.buttons["分享"].exists)
+    }
 }

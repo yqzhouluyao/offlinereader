@@ -33,6 +33,22 @@ struct CursorList<Element> {
         moveAndGet(index.map { $0 + 1 } ?? startIndex)
     }
 
+    /// Returns the next elements after the current cursor without moving it.
+    func nextItems(limit: Int) -> [Element] {
+        guard limit > 0 else {
+            return []
+        }
+
+        let currentIndex = index ?? startIndex
+        let firstIndex = currentIndex + 1
+        guard list.indices.contains(firstIndex) else {
+            return []
+        }
+
+        let lastIndex = min(firstIndex + limit, list.endIndex)
+        return Array(list[firstIndex ..< lastIndex])
+    }
+
     private mutating func moveAndGet(_ index: Int) -> Element? {
         guard list.indices.contains(index) else {
             return nil

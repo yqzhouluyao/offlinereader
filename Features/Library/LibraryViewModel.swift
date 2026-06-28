@@ -18,16 +18,44 @@ enum LibraryShelfFilter: String, CaseIterable, Identifiable, Sendable {
 }
 
 @MainActor
+enum LibraryPinnedBookStorage {
+    private static let key = "offlineReader.library.pinnedBookIDs.v1"
+
+    static func load(defaults: UserDefaults = .standard) -> Set<UUID> {
+        guard let values = defaults.array(forKey: key) as? [String] else {
+            return []
+        }
+        return Set(values.compactMap(UUID.init(uuidString:)))
+    }
+
+    static func save(_ bookIDs: Set<UUID>, defaults: UserDefaults = .standard) {
+        let values = bookIDs.map(\.uuidString).sorted()
+        defaults.set(values, forKey: key)
+    }
+
+    static func remove(bookID: UUID, defaults: UserDefaults = .standard) {
+        var bookIDs = load(defaults: defaults)
+        bookIDs.remove(bookID)
+        save(bookIDs, defaults: defaults)
+    }
+
+    static func reset(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: key)
+    }
+}
+
+@MainActor
 @Observable
 final class LibraryViewModel {
     private let container: AppContainer
-    private let shelfModeKey = "offlineReader.library.shelfMode.v1"
+    static let shelfModeKey = "offlineReader.library.shelfMode.v1"
 
     var books: [BookRecord] = []
     var groups: [LibraryBookGroup] = []
     var sort: LibrarySort = .recent
     var shelfMode: LibraryShelfMode = .grid
     var activeFilter: LibraryShelfFilter = .all
+    private(set) var pinnedBookIDs: Set<UUID> = []
     var isEditing = false
     var selectedBookIDs: Set<UUID> = []
     var isImporting = false
@@ -36,17 +64,19 @@ final class LibraryViewModel {
 
     init(container: AppContainer) {
         self.container = container
-        if let rawValue = UserDefaults.standard.string(forKey: shelfModeKey),
+        if let rawValue = UserDefaults.standard.string(forKey: Self.shelfModeKey),
            let mode = LibraryShelfMode(rawValue: rawValue) {
             shelfMode = mode
         }
+        pinnedBookIDs = LibraryPinnedBookStorage.load()
     }
 
     func load() {
         do {
-            books = try container.repository.fetchBooks(sort: sort)
+            books = applyPinnedOrdering(to: try container.repository.fetchBooks(sort: sort))
             groups = container.libraryGroupStore.load()
             pruneMissingBooksFromGroups()
+            pruneMissingPinnedBooks()
         } catch {
             alertMessage = ReaderAppError.databaseFailure.localizedDescription
             AppLog.library.error("Failed to fetch library")
@@ -60,7 +90,7 @@ final class LibraryViewModel {
 
     func setShelfMode(_ mode: LibraryShelfMode) {
         shelfMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: shelfModeKey)
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.shelfModeKey)
     }
 
     func setFilter(_ filter: LibraryShelfFilter) {
@@ -78,7 +108,21 @@ final class LibraryViewModel {
 
     func books(in group: LibraryBookGroup) -> [BookRecord] {
         let ids = Set(group.bookIDs)
-        return books.filter { ids.contains($0.id) }
+        return applyPinnedOrdering(to: books.filter { ids.contains($0.id) })
+    }
+
+    func isPinned(_ book: BookRecord) -> Bool {
+        pinnedBookIDs.contains(book.id)
+    }
+
+    func togglePinned(_ book: BookRecord) {
+        if pinnedBookIDs.contains(book.id) {
+            pinnedBookIDs.remove(book.id)
+        } else {
+            pinnedBookIDs.insert(book.id)
+        }
+        LibraryPinnedBookStorage.save(pinnedBookIDs)
+        books = applyPinnedOrdering(to: books)
     }
 
     func enterEditing(selecting book: BookRecord? = nil) {
@@ -104,6 +148,20 @@ final class LibraryViewModel {
     func toggleSelectAll() {
         let allIDs = Set(books.map(\.id))
         selectedBookIDs = selectedBookIDs == allIDs ? [] : allIDs
+    }
+
+    func prepareSingleBookMove(_ book: BookRecord) {
+        if isEditing {
+            selectedBookIDs.insert(book.id)
+        } else {
+            selectedBookIDs = [book.id]
+        }
+    }
+
+    func clearTransientSelectionIfNeeded() {
+        if !isEditing {
+            selectedBookIDs = []
+        }
     }
 
     func createGroup(named rawName: String) {
@@ -180,6 +238,8 @@ final class LibraryViewModel {
             try container.repository.delete(bookID: book.id)
             try await container.fileStore.deleteInstalledFiles(bookID: book.id)
             container.readerBookmarkStore.reset(bookID: book.id)
+            pinnedBookIDs.remove(book.id)
+            LibraryPinnedBookStorage.save(pinnedBookIDs)
             remove(bookID: book.id, fromGroups: groups)
             load()
         } catch {
@@ -191,6 +251,17 @@ final class LibraryViewModel {
         books.map(\.id).filter { selectedBookIDs.contains($0) }
     }
 
+    private func applyPinnedOrdering(to books: [BookRecord]) -> [BookRecord] {
+        books.enumerated().sorted { lhs, rhs in
+            let lhsPinned = pinnedBookIDs.contains(lhs.element.id)
+            let rhsPinned = pinnedBookIDs.contains(rhs.element.id)
+            if lhsPinned != rhsPinned {
+                return lhsPinned && !rhsPinned
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
     private func pruneMissingBooksFromGroups() {
         let bookIDs = Set(books.map(\.id))
         let pruned = groups.map { group in
@@ -200,6 +271,15 @@ final class LibraryViewModel {
         }
         if pruned != groups {
             persistGroups(pruned)
+        }
+    }
+
+    private func pruneMissingPinnedBooks() {
+        let bookIDs = Set(books.map(\.id))
+        let pruned = pinnedBookIDs.intersection(bookIDs)
+        if pruned != pinnedBookIDs {
+            pinnedBookIDs = pruned
+            LibraryPinnedBookStorage.save(pruned)
         }
     }
 

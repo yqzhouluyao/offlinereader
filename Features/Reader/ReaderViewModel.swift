@@ -77,6 +77,10 @@ final class ReaderViewModel {
         return activeListeningSnapshot?.isPlaying ?? false
     }
 
+    var isReaderListeningLoading: Bool {
+        listeningState.isActive && listeningState.isLoading
+    }
+
     var readerListeningRemainingText: String {
         if listeningState.isActive {
             return listeningState.remainingTimeText
@@ -269,6 +273,7 @@ final class ReaderViewModel {
         listeningState = ReaderListeningState(
             isActive: true,
             isPlaying: true,
+            isLoading: true,
             chapterTitle: currentSectionTitle,
             utteranceText: "",
             locatorData: session.currentLocatorData ?? book.readingLocatorData,
@@ -342,6 +347,17 @@ final class ReaderViewModel {
         preferences = newValue
         container.preferencesStore.save(newValue)
         await session?.applyPreferences(newValue)
+    }
+
+    func selectSpeechVoice(_ option: ReaderSpeechVoiceOption) async {
+        var updated = preferences
+        updated.speechEngine = option.engine
+        updated.speechVoiceIdentifier = option.identifier
+        let shouldRestartListening = listeningState.isActive
+        await updatePreferences(updated)
+        if shouldRestartListening {
+            await startListening()
+        }
     }
 
     private func makeSession(for record: BookRecord, fileURL: URL, format: SupportedBookFormat) async throws -> any ReaderSessionProtocol {

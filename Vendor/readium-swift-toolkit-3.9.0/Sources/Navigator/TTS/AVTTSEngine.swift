@@ -73,7 +73,7 @@ public class AVTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate, Logg
     @MainActor
     public func speak(
         _ utterance: TTSUtterance,
-        onSpeakRange: @escaping (Range<String.Index>) -> Void
+        onSpeakRange: @Sendable @escaping (Range<String.Index>) -> Void
     ) async -> Result<Void, TTSError> {
         let task = Task(
             utterance: utterance,

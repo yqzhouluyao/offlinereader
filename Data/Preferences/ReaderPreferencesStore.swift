@@ -36,6 +36,13 @@ struct ReaderPreferencesSnapshot: Codable, Equatable, Sendable {
         var id: String { rawValue }
     }
 
+    enum SpeechEngine: String, Codable, Sendable, CaseIterable, Identifiable {
+        case system
+        case edgeReadAloud
+
+        var id: String { rawValue }
+    }
+
     var version: Int = 1
     var theme: Theme = .day
     var font: FontChoice = .publisher
@@ -43,6 +50,8 @@ struct ReaderPreferencesSnapshot: Codable, Equatable, Sendable {
     var lineHeightLevel: Level = .three
     var marginLevel: Level = .three
     var pageTurnMode: PageTurnMode = .verticalScroll
+    var speechEngine: SpeechEngine = .system
+    var speechVoiceIdentifier: String = "zh-CN-XiaoxiaoNeural"
 }
 
 @MainActor

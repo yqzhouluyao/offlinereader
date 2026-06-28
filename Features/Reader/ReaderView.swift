@@ -13,6 +13,8 @@ struct ReaderView: View {
     @State private var followsSystemTheme = false
     @State private var firstLineIndent = false
     @State private var isSearchPresented = false
+    @State private var isListeningPlayerPresented = false
+    @State private var isVoiceSwitcherPresented = false
     @State private var searchQuery = ""
 
     init(container: AppContainer, router: AppRouter, bookID: UUID) {
@@ -28,6 +30,8 @@ struct ReaderView: View {
             readerListeningControls
             readerListenButton
             modalDimmingLayer
+            listeningPlayerOverlay
+            voiceSwitcherOverlay
             readerToast
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -41,6 +45,12 @@ struct ReaderView: View {
         .onChange(of: viewModel.isChromeVisible) { _, isVisible in
             if !isVisible {
                 activePanel = .summary
+            }
+        }
+        .onChange(of: viewModel.shouldShowReaderListeningControls) { _, isVisible in
+            if !isVisible {
+                isListeningPlayerPresented = false
+                isVoiceSwitcherPresented = false
             }
         }
         .onDisappear {
@@ -127,11 +137,23 @@ struct ReaderView: View {
                 book: book,
                 fileStore: container.fileStore,
                 isPlaying: viewModel.isReaderListeningPlaying,
+                isLoading: viewModel.isReaderListeningLoading,
+                voiceTitle: selectedSpeechVoiceTitle,
+                onOpenPlayer: {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                        activePanel = .summary
+                        isListeningPlayerPresented = true
+                    }
+                },
                 onTogglePlayback: { viewModel.pauseOrResumeListening() },
                 onFocusCurrentSentence: {
                     Task { await viewModel.focusListeningPosition() }
                 },
-                onClose: { viewModel.stopListening() }
+                onClose: {
+                    isListeningPlayerPresented = false
+                    isVoiceSwitcherPresented = false
+                    viewModel.stopListening()
+                }
             )
             .padding(.horizontal, 24)
             .padding(.bottom, shouldShowChrome ? 30 : 24)
@@ -220,6 +242,65 @@ struct ReaderView: View {
     }
 
     @ViewBuilder
+    private var listeningPlayerOverlay: some View {
+        if isListeningPlayerPresented,
+           viewModel.shouldShowReaderListeningControls,
+           let book = viewModel.book {
+            ReaderListeningPlayerOverlay(
+                book: book,
+                fileStore: container.fileStore,
+                isPlaying: viewModel.isReaderListeningPlaying,
+                isLoading: viewModel.isReaderListeningLoading,
+                chapterTitle: currentListeningChapterTitle,
+                remainingTimeText: viewModel.readerListeningRemainingText,
+                voiceTitle: selectedSpeechVoiceTitle,
+                onDismiss: {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                        isVoiceSwitcherPresented = false
+                        isListeningPlayerPresented = false
+                    }
+                },
+                onTogglePlayback: { viewModel.pauseOrResumeListening() },
+                onShowVoiceSwitcher: {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                        isVoiceSwitcherPresented = true
+                    }
+                },
+                onClose: {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                        isVoiceSwitcherPresented = false
+                        isListeningPlayerPresented = false
+                    }
+                    viewModel.stopListening()
+                }
+            )
+            .transition(.opacity.combined(with: .scale(scale: 0.985)))
+            .zIndex(20)
+        }
+    }
+
+    @ViewBuilder
+    private var voiceSwitcherOverlay: some View {
+        if isVoiceSwitcherPresented,
+           isListeningPlayerPresented {
+            ReaderVoiceSwitcherSheet(
+                selectedEngine: viewModel.preferences.speechEngine,
+                selectedIdentifier: viewModel.preferences.speechVoiceIdentifier,
+                onSelect: { option in
+                    Task { await viewModel.selectSpeechVoice(option) }
+                },
+                onDismiss: {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                        isVoiceSwitcherPresented = false
+                    }
+                }
+            )
+            .transition(.opacity)
+            .zIndex(30)
+        }
+    }
+
+    @ViewBuilder
     private var readerToast: some View {
         if let toastMessage {
             Text(toastMessage)
@@ -240,6 +321,25 @@ struct ReaderView: View {
             return false
         }
         return viewModel.isChromeVisible
+    }
+
+    private var selectedSpeechVoiceTitle: String {
+        ReaderSpeechVoiceCatalog.option(
+            engine: viewModel.preferences.speechEngine,
+            identifier: viewModel.preferences.speechVoiceIdentifier
+        )?.title ?? viewModel.preferences.speechEngine.readerDisplayTitle
+    }
+
+    private var currentListeningChapterTitle: String {
+        trimmedNonEmpty(viewModel.listeningState.chapterTitle)
+            ?? trimmedNonEmpty(viewModel.currentSectionTitle)
+            ?? trimmedNonEmpty(viewModel.book?.title)
+            ?? "正在朗读"
+    }
+
+    private func trimmedNonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func setActivePanel(_ panel: ReaderPanelMode) {
@@ -304,6 +404,9 @@ private struct ReaderInlineListeningControls: View {
     let book: BookRecord
     let fileStore: BookFileStore
     let isPlaying: Bool
+    let isLoading: Bool
+    let voiceTitle: String
+    let onOpenPlayer: () -> Void
     let onTogglePlayback: () -> Void
     let onFocusCurrentSentence: () -> Void
     let onClose: () -> Void
@@ -311,24 +414,38 @@ private struct ReaderInlineListeningControls: View {
     var body: some View {
         HStack(spacing: 18) {
             HStack(spacing: 8) {
-                ReaderListeningCoverThumbnail(
-                    title: book.title,
-                    coverRelativePath: book.coverRelativePath,
-                    fileStore: fileStore
-                )
-                .frame(width: 46, height: 58)
-                .clipShape(RoundedRectangle(cornerRadius: 5))
-                .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
-
-                Button(action: onTogglePlayback) {
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 26, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .frame(width: 58, height: 58)
+                Button(action: onOpenPlayer) {
+                    ReaderListeningCoverThumbnail(
+                        title: book.title,
+                        coverRelativePath: book.coverRelativePath,
+                        fileStore: fileStore
+                    )
+                    .frame(width: 46, height: 58)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .shadow(color: .black.opacity(0.22), radius: 5, y: 2)
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("reader.inlineListening.openPlayer")
+                .accessibilityLabel("打开听书播放页，当前人声 \(voiceTitle)")
+
+                Button(action: onTogglePlayback) {
+                    Group {
+                        if isLoading {
+                            ProgressView()
+                                .tint(.white)
+                                .controlSize(.regular)
+                        } else {
+                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 26, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.92))
+                        }
+                    }
+                    .frame(width: 58, height: 58)
+                }
+                .disabled(isLoading)
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("reader.inlineListening.playPause")
-                .accessibilityLabel(isPlaying ? "暂停听书" : "继续听书")
+                .accessibilityLabel(isLoading ? "听书加载中" : (isPlaying ? "暂停听书" : "继续听书"))
 
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -369,6 +486,7 @@ private struct ReaderListeningCoverThumbnail: View {
     let title: String
     let coverRelativePath: String?
     let fileStore: BookFileStore
+    var contentMode: ContentMode = .fill
     @State private var image: UIImage?
 
     var body: some View {
@@ -376,7 +494,7 @@ private struct ReaderListeningCoverThumbnail: View {
             if let image {
                 Image(uiImage: image)
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: contentMode)
             } else {
                 ReaderListeningCoverPlaceholder(title: title)
             }
@@ -417,6 +535,407 @@ private struct ReaderListeningCoverPlaceholder: View {
                 .font(.system(size: 22, weight: .bold))
                 .foregroundStyle(.white)
         }
+    }
+}
+
+private struct ReaderListeningPlayerOverlay: View {
+    let book: BookRecord
+    let fileStore: BookFileStore
+    let isPlaying: Bool
+    let isLoading: Bool
+    let chapterTitle: String
+    let remainingTimeText: String
+    let voiceTitle: String
+    let onDismiss: () -> Void
+    let onTogglePlayback: () -> Void
+    let onShowVoiceSwitcher: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            let coverWidth = min(proxy.size.width * 0.58, 286)
+            ZStack {
+                Color(.systemBackground)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    HStack {
+                        Button(action: onDismiss) {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 24, weight: .semibold))
+                                .foregroundStyle(Color(red: 0.17, green: 0.20, blue: 0.25))
+                                .frame(width: 44, height: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("reader.listeningPlayer.dismiss")
+
+                        Spacer()
+
+                        Image(systemName: "arrow.up.forward.app")
+                            .font(.system(size: 24, weight: .regular))
+                            .foregroundStyle(Color(red: 0.17, green: 0.20, blue: 0.25))
+                            .frame(width: 44, height: 44)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+
+                    Spacer(minLength: 34)
+
+                    Text(chapterTitle)
+                        .font(.system(size: 23, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.22, green: 0.24, blue: 0.28))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 34)
+
+                    ReaderListeningCoverThumbnail(
+                        title: book.title,
+                        coverRelativePath: book.coverRelativePath,
+                        fileStore: fileStore,
+                        contentMode: .fit
+                    )
+                    .frame(width: coverWidth, height: coverWidth * 1.32)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .shadow(color: .black.opacity(0.12), radius: 24, y: 14)
+                    .padding(.top, 34)
+
+                    Spacer(minLength: 34)
+
+                    HStack(spacing: 0) {
+                        ReaderListeningPlayerActionButton(icon: "alarm", title: "定时关闭")
+                        ReaderListeningPlayerActionButton(icon: "speedometer", title: "倍速", detail: "1.0x")
+                        ReaderListeningPlayerActionButton(icon: "headphones", title: voiceTitle, action: onShowVoiceSwitcher)
+                        ReaderListeningPlayerActionButton(icon: "book.closed", title: "已加书架")
+                    }
+                    .padding(.horizontal, 16)
+
+                    ReaderListeningProgressBar(remainingTimeText: remainingTimeText)
+                        .padding(.top, 34)
+                        .padding(.horizontal, 24)
+
+                    HStack(spacing: 0) {
+                        ReaderListeningBottomButton(icon: "list.bullet", title: "目录")
+                        Spacer()
+                        ReaderListeningBottomButton(icon: "backward.end.fill", title: "")
+                        Spacer()
+                        Button(action: onTogglePlayback) {
+                            Group {
+                                if isLoading {
+                                    ProgressView()
+                                        .tint(.white)
+                                        .controlSize(.large)
+                                } else {
+                                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                                        .font(.system(size: 38, weight: .bold))
+                                        .foregroundStyle(.white)
+                                }
+                            }
+                            .frame(width: 96, height: 96)
+                            .background(ReaderPalette.accent, in: Circle())
+                        }
+                        .disabled(isLoading)
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("reader.listeningPlayer.playPause")
+                        .accessibilityLabel(isLoading ? "听书加载中" : (isPlaying ? "暂停听书" : "继续听书"))
+                        Spacer()
+                        ReaderListeningBottomButton(icon: "forward.end.fill", title: "")
+                        Spacer()
+                        ReaderListeningBottomButton(icon: "power", title: "退出", action: onClose)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.top, 28)
+                    .padding(.bottom, 28)
+                }
+                .safeAreaPadding(.top, 8)
+                .safeAreaPadding(.bottom, 10)
+            }
+        }
+        .accessibilityIdentifier("reader.listeningPlayer")
+    }
+}
+
+private struct ReaderListeningPlayerActionButton: View {
+    let icon: String
+    let title: String
+    var detail: String?
+    var action: (() -> Void)?
+
+    var body: some View {
+        Button {
+            action?()
+        } label: {
+            VStack(spacing: 8) {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: icon)
+                        .font(.system(size: 30, weight: .regular))
+                        .foregroundStyle(Color(red: 0.31, green: 0.36, blue: 0.45))
+                    if let detail {
+                        Text(detail)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.31, green: 0.36, blue: 0.45))
+                            .offset(x: 24, y: 1)
+                    }
+                }
+                .frame(height: 34)
+
+                Text(title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Color(red: 0.28, green: 0.33, blue: 0.42))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ReaderListeningProgressBar: View {
+    let remainingTimeText: String
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ReaderListeningSkipLabel(text: "15", suffix: "-")
+
+            ZStack {
+                Capsule()
+                    .fill(Color(red: 0.90, green: 0.91, blue: 0.93))
+                    .frame(height: 4)
+
+                GeometryReader { proxy in
+                    Capsule()
+                        .fill(ReaderPalette.accent.opacity(0.84))
+                        .frame(width: proxy.size.width * 0.36, height: 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: 4)
+
+                Text("00:00 / \(remainingTimeText)")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.86), in: Capsule())
+                    .offset(y: -1)
+            }
+
+            ReaderListeningSkipLabel(text: "30", suffix: "+")
+        }
+        .frame(height: 34)
+    }
+}
+
+private struct ReaderListeningSkipLabel: View {
+    let text: String
+    let suffix: String
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "gobackward")
+                .font(.system(size: 27, weight: .regular))
+                .foregroundStyle(Color(red: 0.31, green: 0.36, blue: 0.45))
+                .opacity(suffix == "-" ? 1 : 0)
+            Image(systemName: "goforward")
+                .font(.system(size: 27, weight: .regular))
+                .foregroundStyle(Color(red: 0.31, green: 0.36, blue: 0.45))
+                .opacity(suffix == "+" ? 1 : 0)
+            Text(text)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color(red: 0.31, green: 0.36, blue: 0.45))
+        }
+        .frame(width: 36, height: 34)
+    }
+}
+
+private struct ReaderListeningBottomButton: View {
+    let icon: String
+    let title: String
+    var action: (() -> Void)?
+
+    var body: some View {
+        Button {
+            action?()
+        } label: {
+            VStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 31, weight: .regular))
+                    .foregroundStyle(Color(red: 0.28, green: 0.33, blue: 0.42))
+                    .frame(width: 44, height: 38)
+                Text(title.isEmpty ? " " : title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Color(red: 0.28, green: 0.33, blue: 0.42))
+                    .lineLimit(1)
+            }
+            .frame(width: 54)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ReaderVoiceSwitcherSheet: View {
+    let selectedEngine: ReaderPreferencesSnapshot.SpeechEngine
+    let selectedIdentifier: String
+    let onSelect: (ReaderSpeechVoiceOption) -> Void
+    let onDismiss: () -> Void
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 16),
+        GridItem(.flexible(), spacing: 16)
+    ]
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .bottom) {
+                Color.black.opacity(0.36)
+                    .ignoresSafeArea()
+                    .onTapGesture(perform: onDismiss)
+
+                VStack(spacing: 0) {
+                    HStack {
+                        Button(action: onDismiss) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 25, weight: .medium))
+                                .foregroundStyle(Color(red: 0.16, green: 0.18, blue: 0.22))
+                                .frame(width: 48, height: 48)
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+
+                        Text("切换人声")
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(Color(red: 0.16, green: 0.18, blue: 0.22))
+
+                        Spacer()
+
+                        Color.clear.frame(width: 48, height: 48)
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.top, 14)
+                    .padding(.bottom, 18)
+
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 28) {
+                            ForEach(ReaderSpeechVoiceCatalog.sections()) { section in
+                                VStack(alignment: .leading, spacing: 16) {
+                                    Text(section.title)
+                                        .font(.system(size: 21, weight: .bold))
+                                        .foregroundStyle(Color(red: 0.16, green: 0.18, blue: 0.22))
+                                        .padding(.horizontal, 4)
+
+                                    LazyVGrid(columns: columns, spacing: 14) {
+                                        ForEach(section.options) { option in
+                                            ReaderVoiceOptionCard(
+                                                option: option,
+                                                isSelected: option.engine == selectedEngine
+                                                    && option.identifier == selectedIdentifier,
+                                                onSelect: onSelect
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Text("Edge 云端声音会上传当前朗读文本；系统声音由 iOS 提供。")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(Color(red: 0.54, green: 0.58, blue: 0.64))
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 6)
+                        }
+                        .padding(.horizontal, 22)
+                        .padding(.bottom, 24)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: min(proxy.size.height * 0.68, 620))
+                .background(Color(red: 0.97, green: 0.98, blue: 1.0), in: UnevenRoundedRectangle(topLeadingRadius: 18, topTrailingRadius: 18))
+                .shadow(color: .black.opacity(0.16), radius: 24, y: -8)
+            }
+        }
+        .accessibilityIdentifier("reader.voiceSwitcher")
+    }
+}
+
+private struct ReaderVoiceOptionCard: View {
+    let option: ReaderSpeechVoiceOption
+    let isSelected: Bool
+    let onSelect: (ReaderSpeechVoiceOption) -> Void
+
+    var body: some View {
+        Button {
+            onSelect(option)
+        } label: {
+            HStack(spacing: 11) {
+                ReaderVoiceAvatar(option: option)
+                    .frame(width: 38, height: 38)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(option.title)
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(isSelected ? ReaderPalette.accent : Color(red: 0.16, green: 0.18, blue: 0.22))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+
+                        if isSelected {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(ReaderPalette.accent)
+                        }
+                    }
+
+                    Text(option.subtitle)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color(red: 0.56, green: 0.60, blue: 0.67))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 62)
+            .background(Color.white, in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(isSelected ? ReaderPalette.accent : .clear, lineWidth: 2)
+            }
+            .overlay(alignment: .topTrailing) {
+                if let badge = option.badge {
+                    Text(badge)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color(red: 0.78, green: 0.52, blue: 0.24), in: Capsule())
+                        .offset(x: -4, y: -8)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("reader.voiceSwitcher.voice.\(option.id)")
+    }
+}
+
+private struct ReaderVoiceAvatar: View {
+    let option: ReaderSpeechVoiceOption
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(background)
+
+            Image(systemName: option.engine == .edgeReadAloud ? "cloud.fill" : "iphone")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+    }
+
+    private var background: Color {
+        option.engine == .edgeReadAloud
+            ? Color(red: 0.29, green: 0.63, blue: 0.48)
+            : Color(red: 0.44, green: 0.49, blue: 0.70)
     }
 }
 
@@ -863,6 +1382,21 @@ private struct ReaderSettingsPanel: View {
                 updatePageTurnMode(mode)
             }
 
+            ReaderSpeechEngineSegmentRow(
+                title: "朗读",
+                selected: preferences.speechEngine
+            ) { engine in
+                updateSpeechEngine(engine)
+            }
+
+            if preferences.speechEngine == .edgeReadAloud {
+                ReaderEdgeVoiceRow(
+                    selectedIdentifier: preferences.speechVoiceIdentifier
+                ) { identifier in
+                    updateSpeechVoice(identifier)
+                }
+            }
+
             ReaderLevelSegmentRow(
                 title: "行距",
                 options: [("紧凑", .one), ("适中", .three), ("较松", .five)],
@@ -931,6 +1465,21 @@ private struct ReaderSettingsPanel: View {
     private func updateFont(_ font: ReaderPreferencesSnapshot.FontChoice) {
         var updated = preferences
         updated.font = font
+        onPreferencesChange(updated)
+    }
+
+    private func updateSpeechEngine(_ engine: ReaderPreferencesSnapshot.SpeechEngine) {
+        var updated = preferences
+        updated.speechEngine = engine
+        if ReaderSpeechVoiceCatalog.option(engine: engine, identifier: updated.speechVoiceIdentifier) == nil {
+            updated.speechVoiceIdentifier = ReaderSpeechVoiceCatalog.defaultIdentifier(for: engine)
+        }
+        onPreferencesChange(updated)
+    }
+
+    private func updateSpeechVoice(_ identifier: String) {
+        var updated = preferences
+        updated.speechVoiceIdentifier = identifier
         onPreferencesChange(updated)
     }
 }
@@ -1501,6 +2050,78 @@ private struct ReaderPageTurnSegmentRow: View {
     }
 }
 
+private struct ReaderSpeechEngineSegmentRow: View {
+    let title: String
+    let selected: ReaderPreferencesSnapshot.SpeechEngine
+    let onSelect: (ReaderPreferencesSnapshot.SpeechEngine) -> Void
+
+    var body: some View {
+        ReaderSegmentContainer(title: title) {
+            HStack(spacing: 0) {
+                ForEach(ReaderPreferencesSnapshot.SpeechEngine.allCases) { option in
+                    Button { onSelect(option) } label: {
+                        Text(option.readerDisplayTitle)
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(option == selected ? Color(.label) : ReaderPalette.secondaryText)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 44)
+                            .background(option == selected ? Color(.systemBackground).opacity(0.82) : .clear, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("reader.settings.speechEngine.\(option.rawValue)")
+                }
+            }
+        }
+    }
+}
+
+private struct ReaderEdgeVoiceRow: View {
+    let selectedIdentifier: String
+    let onSelect: (String) -> Void
+
+    private var selectedVoiceName: String {
+        EdgeReadAloudVoice.available.first { $0.identifier == selectedIdentifier }?.name ?? "Xiaoxiao"
+    }
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Text("语者")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(ReaderPalette.secondaryText)
+                .frame(width: 42, alignment: .leading)
+
+            Menu {
+                ForEach(EdgeReadAloudVoice.available, id: \.identifier) { voice in
+                    Button {
+                        onSelect(voice.identifier)
+                    } label: {
+                        if voice.identifier == selectedIdentifier {
+                            Label(voice.name, systemImage: "checkmark")
+                        } else {
+                            Text(voice.name)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(selectedVoiceName)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color(.label))
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(ReaderPalette.secondaryText)
+                }
+                .padding(.horizontal, 18)
+                .frame(height: 48)
+                .background(ReaderPalette.paleControl, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("reader.settings.edgeVoice")
+        }
+    }
+}
+
 private struct ReaderLevelSegmentRow: View {
     let title: String
     let options: [(String, ReaderPreferencesSnapshot.Level)]
@@ -1631,6 +2252,17 @@ private extension ReaderPreferencesSnapshot.PageTurnMode {
             "上下滑动"
         case .curl:
             "仿真翻页"
+        }
+    }
+}
+
+private extension ReaderPreferencesSnapshot.SpeechEngine {
+    var readerDisplayTitle: String {
+        switch self {
+        case .system:
+            "系统"
+        case .edgeReadAloud:
+            "Edge"
         }
     }
 }

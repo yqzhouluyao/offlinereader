@@ -146,7 +146,7 @@ public class HTMLResourceContentIterator: ContentIterator {
         // Update the `startIndex` if a particular progression was requested.
         if
             elements.startIndex == 0,
-            locator.locations.cssSelector == nil,
+            (locator.locations.cssSelector == nil || !elements.didMatchStartElement),
             let progression = locator.locations.progression,
             progression > 0, progression < 1
         {
@@ -167,6 +167,7 @@ public class HTMLResourceContentIterator: ContentIterator {
     private struct ParsedElements {
         var elements: [ContentElement] = []
         var startIndex: Int = 0
+        var didMatchStartElement = false
     }
 
     private class ContentParser: NodeVisitor {
@@ -187,12 +188,14 @@ public class HTMLResourceContentIterator: ContentIterator {
                 elements: elements,
                 startIndex: (baseLocator.locations.progression == 1.0)
                     ? elements.count - 1
-                    : startIndex
+                    : startIndex,
+                didMatchStartElement: didMatchStartElement
             )
         }
 
         private var elements: [ContentElement] = []
         private var startIndex = 0
+        private var didMatchStartElement = false
 
         /// Segments accumulated for the current element.
         private var segmentsAcc: [TextContentElement.Segment] = []
@@ -367,6 +370,7 @@ public class HTMLResourceContentIterator: ContentIterator {
             let parent = breadcrumbs.last
 
             if startIndex == 0, startElement != nil, parent?.element == startElement {
+                didMatchStartElement = true
                 startIndex = elements.count
             }
 
@@ -545,12 +549,22 @@ private struct CSSSelectorGenerator {
     private func cssEscapeIdentifier(_ identifier: String) -> String {
         var escaped = ""
         escaped.reserveCapacity(identifier.count)
-        for character in identifier {
-            if character.isLetter || character.isNumber || character == "-" || character == "_" {
+        let characters = Array(identifier)
+        let startsWithHyphenDigit = characters.count > 1
+            && characters.first == "-"
+            && characters.dropFirst().first?.isNumber == true
+        for (index, character) in characters.enumerated() {
+            let isFirst = index == 0
+            let isSafeHyphen = character == "-"
+                && !(isFirst && (characters.count == 1 || startsWithHyphenDigit))
+            if character.isLetter || character == "_" || isSafeHyphen || (!isFirst && character.isNumber) {
                 escaped.append(character)
             } else {
-                escaped.append("\\")
-                escaped.append(character)
+                for scalar in String(character).unicodeScalars {
+                    escaped.append("\\")
+                    escaped.append(String(scalar.value, radix: 16).uppercased())
+                    escaped.append(" ")
+                }
             }
         }
         return escaped

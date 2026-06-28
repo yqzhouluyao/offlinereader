@@ -10,9 +10,16 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
     private let text: String
     private let estimatedPageCount: Int
     private let viewController: PlainTextReaderViewController
+    private var preferences: ReaderPreferencesSnapshot
     private let speechSynthesizer = AVSpeechSynthesizer()
+    private var edgeSpeechEngine: EdgeReadAloudTTSEngine?
+    private var edgeSpeechTask: Task<Void, Never>?
+    private var prefetchedEdgeUtteranceIndexes: Set<Int> = []
     private lazy var utterances: [PlainTextUtterance] = makeUtterances()
     private var currentUtteranceIndex: Int?
+    private var currentUtteranceStartLocation: Int?
+    private var activePlaybackUtterance: PlainTextUtterance?
+    private var currentSpokenPhraseRange: NSRange?
     private var isStoppingSpeech = false
     private var isListeningActive = false
     var onLocationChanged: ((Data, Double) -> Void)?
@@ -42,6 +49,7 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
         self.title = title
         self.text = text
         self.estimatedPageCount = max(1, Int(ceil(Double(text.count) / 900.0)))
+        self.preferences = preferences
         let initialProgress = initialLocatorData
             .flatMap { try? LocatorCoding.decode($0) }
             .flatMap { $0.locations.totalProgression ?? $0.locations.progression } ?? 0
@@ -63,6 +71,10 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
         }
         viewController.onChromeToggleRequested = { [weak self] in
             self?.onChromeToggleRequested?()
+        }
+        viewController.onListeningStartRequestedAtLocation = { [weak self] location in
+            guard let self else { return }
+            self.beginListening(startingAt: location)
         }
     }
 
@@ -147,6 +159,15 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
     }
 
     func applyPreferences(_ snapshot: ReaderPreferencesSnapshot) async {
+        let didChangeSpeechEngine = preferences.speechEngine != snapshot.speechEngine
+            || preferences.speechVoiceIdentifier != snapshot.speechVoiceIdentifier
+        preferences = snapshot
+        if didChangeSpeechEngine {
+            prefetchedEdgeUtteranceIndexes.removeAll()
+        }
+        if didChangeSpeechEngine, isListeningActive {
+            stopListening()
+        }
         viewController.apply(preferences: snapshot)
     }
 
@@ -155,15 +176,20 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
             onListeningStateChanged?(.inactive)
             return
         }
-        configureAudioSession()
-        let startIndex = viewController.visibleTextLocationNearReadingTop()
-            .map { utteranceIndex(startingAt: $0) }
-            ?? utteranceIndex(near: viewController.currentProgress)
-        currentUtteranceIndex = startIndex
-        playCurrentUtterance()
+        if let location = viewController.visibleTextLocationNearReadingCenter() {
+            beginListening(startingAt: location)
+        } else {
+            beginListening(startIndex: utteranceIndex(near: viewController.currentProgress))
+        }
     }
 
     func pauseOrResumeListening() {
+        if preferences.speechEngine == .edgeReadAloud {
+            edgeSpeechEngine?.pauseOrResume()
+            notifyCurrentUtterance(isPlaying: edgeSpeechEngine?.isSpeaking == true)
+            return
+        }
+
         if speechSynthesizer.isPaused {
             speechSynthesizer.continueSpeaking()
             notifyCurrentUtterance(isPlaying: true)
@@ -179,14 +205,26 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
         else {
             return
         }
-        viewController.scrollRangeToVisible(utterances[index].nsRange)
+        viewController.scrollRangeToVisible(
+            currentSpokenPhraseRange
+                ?? activePlaybackUtterance?.nsRange
+                ?? utterances[index].nsRange
+        )
     }
 
     func stopListening() {
         isStoppingSpeech = true
         isListeningActive = false
+        edgeSpeechTask?.cancel()
+        edgeSpeechTask = nil
+        edgeSpeechEngine?.stopPlayback()
+        edgeSpeechEngine = nil
+        prefetchedEdgeUtteranceIndexes.removeAll()
         speechSynthesizer.stopSpeaking(at: .immediate)
         currentUtteranceIndex = nil
+        currentUtteranceStartLocation = nil
+        activePlaybackUtterance = nil
+        currentSpokenPhraseRange = nil
         viewController.highlightSpokenSentence(nil)
         onListeningStateChanged?(.inactive)
     }
@@ -214,19 +252,13 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
     private func makeUtterances() -> [PlainTextUtterance] {
         var items: [PlainTextUtterance] = []
         text.enumerateSubstrings(in: text.startIndex ..< text.endIndex, options: [.bySentences, .localized]) { _, range, _, _ in
-            let sentence = String(self.text[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let sentenceRange = self.text[range].plainTextTrimmingRange(in: self.text)
+            let sentence = String(self.text[sentenceRange])
             guard sentence.contains(where: { $0.isLetter || $0.isNumber }) else {
                 return
             }
-            let nsRange = NSRange(range, in: self.text)
-            let progress = Double(nsRange.location) / Double(max((self.text as NSString).length, 1))
-            items.append(
-                PlainTextUtterance(
-                    text: sentence,
-                    nsRange: nsRange,
-                    progress: progress.clamped(to: 0 ... 1)
-                )
-            )
+            let sentenceNSRange = NSRange(sentenceRange, in: self.text)
+            items.append(self.plainTextUtterance(text: sentence, nsRange: sentenceNSRange))
         }
 
         if items.isEmpty {
@@ -244,6 +276,15 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
         return items
     }
 
+    private func plainTextUtterance(text: String, nsRange: NSRange) -> PlainTextUtterance {
+        let progress = Double(nsRange.location) / Double(max((self.text as NSString).length, 1))
+        return PlainTextUtterance(
+            text: text,
+            nsRange: nsRange,
+            progress: progress.clamped(to: 0 ... 1)
+        )
+    }
+
     private func utteranceIndex(near progress: Double) -> Int {
         let textLength = max((text as NSString).length, 1)
         let location = Int((progress.clamped(to: 0 ... 1) * Double(textLength)).rounded(.down))
@@ -251,7 +292,7 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
     }
 
     private func utteranceIndex(startingAt location: Int) -> Int {
-        return utterances.firstIndex { NSMaxRange($0.nsRange) >= location } ?? max(utterances.count - 1, 0)
+        return utterances.firstIndex { NSMaxRange($0.nsRange) > location } ?? max(utterances.count - 1, 0)
     }
 
     private func playCurrentUtterance() {
@@ -264,30 +305,185 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
 
         isStoppingSpeech = false
         isListeningActive = true
-        let utterance = utterances[index]
-        viewController.highlightSpokenSentence(utterance.nsRange)
-        viewController.scrollRangeToVisibleIfNeeded(utterance.nsRange)
-        notifyCurrentUtterance(isPlaying: true)
+        let utterance = playbackUtterance(for: utterances[index])
+        activePlaybackUtterance = utterance
+        currentSpokenPhraseRange = nil
+        updateCurrentSpokenPhrase(for: utterance, localSpokenRange: nil, isPlaying: true)
+
+        if preferences.speechEngine == .edgeReadAloud {
+            playCurrentUtteranceWithEdge(utterance)
+            return
+        }
 
         let speechUtterance = AVSpeechUtterance(string: utterance.text)
-        speechUtterance.voice = AVSpeechSynthesisVoice(language: Locale.preferredLanguages.first ?? "zh-CN")
-        speechUtterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        NarrationSpeechConfiguration.configure(speechUtterance, text: utterance.text)
+        if preferences.speechEngine == .system,
+           let selectedVoice = AVSpeechSynthesisVoice(identifier: preferences.speechVoiceIdentifier) {
+            speechUtterance.voice = selectedVoice
+        }
         speechSynthesizer.speak(speechUtterance)
     }
 
-    private func notifyCurrentUtterance(isPlaying: Bool) {
+    private func playbackUtterance(for source: PlainTextUtterance) -> PlainTextUtterance {
+        guard let startLocation = currentUtteranceStartLocation,
+              startLocation > source.nsRange.location,
+              startLocation < NSMaxRange(source.nsRange)
+        else {
+            return source
+        }
+
+        let nsRange = NSRange(
+            location: startLocation,
+            length: NSMaxRange(source.nsRange) - startLocation
+        )
+        guard let range = Range(nsRange, in: text) else {
+            return source
+        }
+
+        let trimmedRange = text[range].plainTextTrimmingRange(in: text)
+        guard trimmedRange.lowerBound < trimmedRange.upperBound else {
+            return source
+        }
+
+        return plainTextUtterance(
+            text: String(text[trimmedRange]),
+            nsRange: NSRange(trimmedRange, in: text)
+        )
+    }
+
+    private func beginListening(startingAt location: Int) {
+        beginListening(
+            startIndex: utteranceIndex(startingAt: location),
+            startLocation: location
+        )
+    }
+
+    private func beginListening(startIndex: Int) {
+        beginListening(startIndex: startIndex, startLocation: nil)
+    }
+
+    private func beginListening(startIndex: Int, startLocation: Int?) {
+        guard isListeningAvailable else {
+            onListeningStateChanged?(.inactive)
+            return
+        }
+
+        configureAudioSession()
+        if speechSynthesizer.isSpeaking || speechSynthesizer.isPaused {
+            isStoppingSpeech = true
+            speechSynthesizer.stopSpeaking(at: .immediate)
+        }
+        edgeSpeechTask?.cancel()
+        edgeSpeechTask = nil
+        edgeSpeechEngine?.stopPlayback()
+        edgeSpeechEngine = nil
+        currentUtteranceIndex = startIndex.clamped(to: 0 ... max(utterances.count - 1, 0))
+        currentUtteranceStartLocation = startLocation
+        activePlaybackUtterance = nil
+        prefetchUpcomingEdgeUtterances(startingAt: (currentUtteranceIndex ?? 0) + 1)
+        playCurrentUtterance()
+    }
+
+    private func playCurrentUtteranceWithEdge(_ utterance: PlainTextUtterance) {
+        let engine = EdgeReadAloudTTSEngine(voiceIdentifier: preferences.speechVoiceIdentifier)
+        edgeSpeechEngine = engine
+        edgeSpeechTask?.cancel()
+        edgeSpeechTask = Task { @MainActor [weak self, engine, utterance] in
+            let languageIdentifier = NarrationSpeechConfiguration.preferredLanguageIdentifier(for: utterance.text)
+            let result = await engine.speakText(
+                utterance.text,
+                language: Language(code: .bcp47(languageIdentifier)),
+                onSpeakRange: { [weak self] range in
+                    guard let self,
+                          self.isListeningActive,
+                          self.edgeSpeechEngine === engine
+                    else {
+                        return
+                    }
+                    self.updateCurrentSpokenPhrase(
+                        for: utterance,
+                        localSpokenRange: NSRange(range, in: utterance.text),
+                        isPlaying: true
+                    )
+                }
+            )
+
+            guard let self,
+                  self.isListeningActive,
+                  !self.isStoppingSpeech,
+                  self.edgeSpeechEngine === engine
+            else {
+                self?.isStoppingSpeech = false
+                return
+            }
+
+            switch result {
+            case .success:
+                self.edgeSpeechEngine = nil
+                self.edgeSpeechTask = nil
+                self.advanceToNextUtterance()
+            case .failure(let error):
+                AppLog.reader.error("Plain text Edge TTS error: \(String(describing: error), privacy: .public)")
+                self.notifyCurrentUtterance(isPlaying: false)
+            }
+        }
+    }
+
+    private func prefetchUpcomingEdgeUtterances(startingAt index: Int) {
+        guard preferences.speechEngine == .edgeReadAloud else {
+            prefetchedEdgeUtteranceIndexes.removeAll()
+            return
+        }
+
+        let range = index ..< min(index + 6, utterances.count)
+        let indexes = range.filter { !prefetchedEdgeUtteranceIndexes.contains($0) }
+        guard !indexes.isEmpty else {
+            return
+        }
+
+        indexes.forEach { prefetchedEdgeUtteranceIndexes.insert($0) }
+        EdgeReadAloudTTSEngine.prefetch(
+            texts: indexes.map { utterances[$0].text },
+            preferredVoiceIdentifier: preferences.speechVoiceIdentifier
+        )
+    }
+
+    private func updateCurrentSpokenPhrase(
+        for utterance: PlainTextUtterance,
+        localSpokenRange: NSRange?,
+        isPlaying: Bool
+    ) {
+        let phraseRange = spokenPhraseRange(for: utterance, localSpokenRange: localSpokenRange)
+        if currentSpokenPhraseRange.map({ NSEqualRanges($0, phraseRange) }) != true {
+            currentSpokenPhraseRange = phraseRange
+            viewController.highlightSpokenSentence(phraseRange)
+            viewController.scrollRangeToVisibleIfNeeded(phraseRange)
+        }
+        let phraseText = (text as NSString).substring(with: phraseRange)
+        notifyCurrentUtterance(isPlaying: isPlaying, spokenText: phraseText)
+    }
+
+    private func spokenPhraseRange(
+        for utterance: PlainTextUtterance,
+        localSpokenRange: NSRange?
+    ) -> NSRange {
+        utterance.nsRange
+    }
+
+    private func notifyCurrentUtterance(isPlaying: Bool, spokenText: String? = nil) {
         guard let index = currentUtteranceIndex,
               utterances.indices.contains(index)
         else {
             return
         }
-        let utterance = utterances[index]
+        let utterance = activePlaybackUtterance ?? utterances[index]
         onListeningStateChanged?(
             ReaderListeningState(
                 isActive: true,
                 isPlaying: isPlaying,
+                isLoading: false,
                 chapterTitle: title,
-                utteranceText: utterance.text.readerCollapsedWhitespace,
+                utteranceText: (spokenText ?? utterance.text).readerCollapsedWhitespace,
                 locatorData: makeLocatorData(progress: utterance.progress),
                 remainingSeconds: max(60, (utterances.count - index) * 8)
             )
@@ -297,13 +493,32 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
     private func finishListening() {
         isListeningActive = false
         currentUtteranceIndex = nil
+        currentUtteranceStartLocation = nil
+        activePlaybackUtterance = nil
+        currentSpokenPhraseRange = nil
+        edgeSpeechTask?.cancel()
+        edgeSpeechTask = nil
+        edgeSpeechEngine?.stopPlayback()
+        edgeSpeechEngine = nil
         viewController.highlightSpokenSentence(nil)
         onListeningStateChanged?(.inactive)
     }
 
+    private func advanceToNextUtterance() {
+        guard let index = currentUtteranceIndex else {
+            finishListening()
+            return
+        }
+        currentSpokenPhraseRange = nil
+        currentUtteranceStartLocation = nil
+        activePlaybackUtterance = nil
+        currentUtteranceIndex = index + 1
+        prefetchUpcomingEdgeUtterances(startingAt: currentUtteranceIndex ?? index + 1)
+        playCurrentUtterance()
+    }
+
     private func configureAudioSession() {
-        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-        try? AVAudioSession.sharedInstance().setActive(true)
+        NarrationSpeechConfiguration.configureAudioSession()
     }
 }
 
@@ -314,6 +529,27 @@ private struct PlainTextUtterance {
 }
 
 extension PlainTextReaderSession: AVSpeechSynthesizerDelegate {
+    nonisolated func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        willSpeakRangeOfSpeechString characterRange: NSRange,
+        utterance: AVSpeechUtterance
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self,
+                  isListeningActive,
+                  let index = currentUtteranceIndex,
+                  utterances.indices.contains(index)
+            else {
+                return
+            }
+            updateCurrentSpokenPhrase(
+                for: activePlaybackUtterance ?? utterances[index],
+                localSpokenRange: characterRange,
+                isPlaying: true
+            )
+        }
+    }
+
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor [weak self] in
             guard let self else {
@@ -323,12 +559,11 @@ extension PlainTextReaderSession: AVSpeechSynthesizerDelegate {
                 isStoppingSpeech = false
                 return
             }
-            guard let index = currentUtteranceIndex else {
+            guard currentUtteranceIndex != nil else {
                 finishListening()
                 return
             }
-            currentUtteranceIndex = index + 1
-            playCurrentUtterance()
+            advanceToNextUtterance()
         }
     }
 
@@ -339,17 +574,46 @@ extension PlainTextReaderSession: AVSpeechSynthesizerDelegate {
     }
 }
 
+private extension Substring {
+    func plainTextTrimmingRange(in source: String) -> Range<String.Index> {
+        var lower = startIndex
+        var upper = endIndex
+
+        while lower < upper, source[lower].isPlainTextNarrationWhitespace {
+            lower = source.index(after: lower)
+        }
+
+        while lower < upper {
+            let previous = source.index(before: upper)
+            guard source[previous].isPlainTextNarrationWhitespace else {
+                break
+            }
+            upper = previous
+        }
+
+        return lower ..< upper
+    }
+}
+
+private extension Character {
+    var isPlainTextNarrationWhitespace: Bool {
+        unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+    }
+}
+
 @MainActor
 private final class PlainTextReaderViewController: UIViewController, UITextViewDelegate {
     private let text: String
     private let initialProgress: Double
     private let textView = UITextView()
+    private let spokenHighlightLayer = CAShapeLayer()
     private var didApplyInitialProgress = false
     private var preferences: ReaderPreferencesSnapshot
     private var spokenSentenceRange: NSRange?
 
     var onProgressChanged: ((Double) -> Void)?
     var onChromeToggleRequested: (() -> Void)?
+    var onListeningStartRequestedAtLocation: ((Int) -> Void)?
 
     var currentProgress: Double {
         let maxOffset = max(textView.contentSize.height - textView.bounds.height, 1)
@@ -383,20 +647,31 @@ private final class PlainTextReaderViewController: UIViewController, UITextViewD
         textView.text = text
         textView.textContainer.lineFragmentPadding = 0
         view.addSubview(textView)
+        spokenHighlightLayer.fillColor = ReaderSession.ttsHighlightOverlayFill.cgColor
+        spokenHighlightLayer.isHidden = true
+        spokenHighlightLayer.allowsEdgeAntialiasing = true
+        textView.layer.addSublayer(spokenHighlightLayer)
         NSLayoutConstraint.activate([
             textView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             textView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             textView.topAnchor.constraint(equalTo: view.topAnchor),
             textView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleListeningDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        doubleTap.cancelsTouchesInView = false
+        view.addGestureRecognizer(doubleTap)
+
         let tap = UITapGestureRecognizer(target: self, action: #selector(toggleChrome))
         tap.cancelsTouchesInView = false
+        tap.require(toFail: doubleTap)
         view.addGestureRecognizer(tap)
         apply(preferences: preferences)
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateSpokenHighlightLayer()
         guard !didApplyInitialProgress else {
             return
         }
@@ -405,6 +680,7 @@ private final class PlainTextReaderViewController: UIViewController, UITextViewD
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateSpokenHighlightLayer()
         onProgressChanged?(currentProgress)
     }
 
@@ -425,16 +701,17 @@ private final class PlainTextReaderViewController: UIViewController, UITextViewD
     func highlightSpokenSentence(_ range: NSRange?) {
         spokenSentenceRange = range
         renderText(preservingOffset: true)
+        updateSpokenHighlightLayer()
     }
 
-    func visibleTextLocationNearReadingTop() -> Int? {
+    func visibleTextLocationNearReadingCenter() -> Int? {
         guard textView.attributedText.length > 0 else {
             return nil
         }
         textView.layoutIfNeeded()
         let point = CGPoint(
-            x: 1,
-            y: max(textView.contentOffset.y + readingTopY - textView.textContainerInset.top, 0)
+            x: max(textView.bounds.midX - textView.textContainerInset.left, 1),
+            y: max(textView.contentOffset.y + readingCenterY - textView.textContainerInset.top, 0)
         )
         let location = textView.layoutManager.characterIndex(
             for: point,
@@ -445,16 +722,11 @@ private final class PlainTextReaderViewController: UIViewController, UITextViewD
     }
 
     func scrollRangeToVisible(_ range: NSRange) {
-        scrollRangeToReadingTop(range, animated: false)
+        scrollRangeToReadingCenter(range, animated: false)
     }
 
     func scrollRangeToVisibleIfNeeded(_ range: NSRange) {
-        guard let rect = textViewportRect(for: range) else {
-            return
-        }
-        if rect.maxY > readingBottomY {
-            scrollRangeToReadingTop(range, animated: false)
-        }
+        scrollRangeToReadingCenter(range, animated: true)
     }
 
     private func renderText(preservingOffset: Bool) {
@@ -475,7 +747,7 @@ private final class PlainTextReaderViewController: UIViewController, UITextViewD
            NSMaxRange(spokenSentenceRange) <= attributedText.length {
             attributedText.addAttribute(
                 .backgroundColor,
-                value: UIColor(red: 0.63, green: 0.84, blue: 0.94, alpha: 0.56),
+                value: ReaderSession.ttsHighlightFill.withAlphaComponent(0.28),
                 range: spokenSentenceRange
             )
         }
@@ -483,6 +755,59 @@ private final class PlainTextReaderViewController: UIViewController, UITextViewD
         if preservingOffset {
             textView.setContentOffset(offset, animated: false)
         }
+        updateSpokenHighlightLayer()
+    }
+
+    private func updateSpokenHighlightLayer() {
+        spokenHighlightLayer.frame = textView.bounds
+        guard let spokenSentenceRange,
+              spokenSentenceRange.location != NSNotFound,
+              spokenSentenceRange.length > 0,
+              NSMaxRange(spokenSentenceRange) <= textView.attributedText.length
+        else {
+            spokenHighlightLayer.isHidden = true
+            spokenHighlightLayer.path = nil
+            return
+        }
+
+        textView.layoutIfNeeded()
+        textView.layoutManager.ensureLayout(for: textView.textContainer)
+        let glyphRange = textView.layoutManager.glyphRange(
+            forCharacterRange: spokenSentenceRange,
+            actualCharacterRange: nil
+        )
+        guard glyphRange.length > 0 else {
+            spokenHighlightLayer.isHidden = true
+            spokenHighlightLayer.path = nil
+            return
+        }
+
+        let path = UIBezierPath()
+        let visibleBounds = textView.bounds.insetBy(dx: -8, dy: -12)
+        textView.layoutManager.enumerateEnclosingRects(
+            forGlyphRange: glyphRange,
+            withinSelectedGlyphRange: glyphRange,
+            in: textView.textContainer
+        ) { [weak self] rect, _ in
+            guard let self else { return }
+            var highlightRect = rect
+            highlightRect.origin.x += self.textView.textContainerInset.left - 4
+            highlightRect.origin.y += self.textView.textContainerInset.top - self.textView.contentOffset.y - 2
+            highlightRect.size.width += 8
+            highlightRect.size.height += 4
+            guard highlightRect.intersects(visibleBounds) else {
+                return
+            }
+            path.append(
+                UIBezierPath(
+                    roundedRect: highlightRect,
+                    cornerRadius: min(5, highlightRect.height / 2)
+                )
+            )
+        }
+
+        spokenHighlightLayer.path = path.cgPath
+        spokenHighlightLayer.isHidden = path.isEmpty
     }
 
     private var readingTopY: CGFloat {
@@ -493,28 +818,21 @@ private final class PlainTextReaderViewController: UIViewController, UITextViewD
     }
 
     private var readingBottomY: CGFloat {
-        let bottomInset = min(
-            ReaderChromeLayoutMetrics.bottomReadingInset(for: view),
-            max(textView.bounds.height * 0.35, 0)
-        )
+        let bottomInset = ReaderChromeLayoutMetrics.listeningAutoAdvanceBottomInset(for: view)
         return max(readingTopY + 120, textView.bounds.height - bottomInset)
     }
 
-    private func scrollRangeToReadingTop(_ range: NSRange, animated: Bool) {
+    private var readingCenterY: CGFloat {
+        (readingTopY + readingBottomY) / 2
+    }
+
+    private func scrollRangeToReadingCenter(_ range: NSRange, animated: Bool) {
         guard let rect = textContentRect(for: range) else {
             return
         }
         let maxOffset = max(textView.contentSize.height - textView.bounds.height, 0)
-        let targetY = (rect.minY - readingTopY).clamped(to: 0 ... maxOffset)
+        let targetY = (rect.midY - readingCenterY).clamped(to: 0 ... maxOffset)
         textView.setContentOffset(CGPoint(x: 0, y: targetY), animated: animated)
-    }
-
-    private func textViewportRect(for range: NSRange) -> CGRect? {
-        guard var rect = textContentRect(for: range) else {
-            return nil
-        }
-        rect.origin.y -= textView.contentOffset.y
-        return rect
     }
 
     private func textContentRect(for range: NSRange) -> CGRect? {
@@ -536,6 +854,38 @@ private final class PlainTextReaderViewController: UIViewController, UITextViewD
         rect.origin.x += textView.textContainerInset.left
         rect.origin.y += textView.textContainerInset.top
         return rect
+    }
+
+    private func textLocation(at point: CGPoint) -> Int? {
+        guard textView.attributedText.length > 0 else {
+            return nil
+        }
+
+        textView.layoutIfNeeded()
+        let pointInTextView = view.convert(point, to: textView)
+        guard textView.bounds.insetBy(dx: -24, dy: -24).contains(pointInTextView) else {
+            return nil
+        }
+
+        let containerPoint = CGPoint(
+            x: pointInTextView.x - textView.textContainerInset.left,
+            y: pointInTextView.y + textView.contentOffset.y - textView.textContainerInset.top
+        )
+        let location = textView.layoutManager.characterIndex(
+            for: containerPoint,
+            in: textView.textContainer,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+        return location.clamped(to: 0 ... max(textView.attributedText.length - 1, 0))
+    }
+
+    @objc private func handleListeningDoubleTap(_ recognizer: UITapGestureRecognizer) {
+        guard recognizer.state == .ended,
+              let location = textLocation(at: recognizer.location(in: view))
+        else {
+            return
+        }
+        onListeningStartRequestedAtLocation?(location)
     }
 
     @objc private func toggleChrome() {

@@ -23,14 +23,19 @@ public protocol TTSEngine: AnyObject {
     /// `onSpeakRange` is called repeatedly while the engine plays portions (e.g. words) of the utterance.
     func speak(
         _ utterance: TTSUtterance,
-        onSpeakRange: @escaping (Range<String.Index>) -> Void
+        onSpeakRange: @Sendable @escaping (Range<String.Index>) -> Void
     ) async -> Result<Void, TTSError>
+
+    /// Starts preparing upcoming utterances when the engine supports caching.
+    func prefetch(_ utterances: [TTSUtterance])
 }
 
 public extension TTSEngine {
     func voiceWithIdentifier(_ identifier: String) -> TTSVoice? {
         availableVoices.first { $0.identifier == identifier }
     }
+
+    func prefetch(_ utterances: [TTSUtterance]) {}
 }
 
 public enum TTSError: Error {
@@ -60,5 +65,11 @@ public struct TTSUtterance {
         case let .right(language):
             return language
         }
+    }
+
+    public init(text: String, delay: TimeInterval, voiceOrLanguage: Either<TTSVoice, Language>) {
+        self.text = text
+        self.delay = delay
+        self.voiceOrLanguage = voiceOrLanguage
     }
 }

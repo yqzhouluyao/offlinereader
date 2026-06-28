@@ -32,6 +32,7 @@ struct LibraryView: View {
     @State private var viewModel: LibraryViewModel
     @State private var sheet: LibrarySheet?
     @State private var activeOverlay: LibraryOverlay?
+    @State private var actionBook: BookRecord?
     @State private var showFileImporter = false
     @State private var showDeleteSelectedConfirmation = false
     @State private var newGroupName = ""
@@ -146,6 +147,16 @@ struct LibraryView: View {
         } message: {
             Text("将从列表和本地文件中移除 \(viewModel.selectedBookIDs.count) 本图书。")
         }
+        .confirmationDialog(
+            "",
+            isPresented: Binding(
+                get: { actionBook != nil },
+                set: { if !$0 { actionBook = nil } }
+            ),
+            titleVisibility: .hidden
+        ) {
+            bookActionButtons
+        }
         .overlay {
             if viewModel.isImporting {
                 ProgressView("library.importing")
@@ -229,7 +240,9 @@ struct LibraryView: View {
                 LibraryBookGridItemView(
                     book: book,
                     fileStore: container.fileStore,
-                    onOpen: { router.openReader(bookID: book.id) }
+                    isPinned: viewModel.isPinned(book),
+                    onOpen: { router.openReader(bookID: book.id) },
+                    onMore: { actionBook = book }
                 )
                 .simultaneousGesture(
                     LongPressGesture(minimumDuration: 0.36)
@@ -260,7 +273,8 @@ struct LibraryView: View {
                 LibraryBookRowView(
                     book: book,
                     fileStore: container.fileStore,
-                    onOpen: { router.openReader(bookID: book.id) }
+                    onOpen: { router.openReader(bookID: book.id) },
+                    onMore: { actionBook = book }
                 )
                 .simultaneousGesture(
                     LongPressGesture(minimumDuration: 0.36)
@@ -308,7 +322,7 @@ struct LibraryView: View {
         if let activeOverlay {
             Color.black.opacity(0.62)
                 .ignoresSafeArea()
-                .onTapGesture { self.activeOverlay = nil }
+                .onTapGesture { closeOverlay() }
 
             switch activeOverlay {
             case .moveToGroup:
@@ -316,14 +330,14 @@ struct LibraryView: View {
                     groups: viewModel.groups,
                     booksForGroup: { viewModel.books(in: $0) },
                     fileStore: container.fileStore,
-                    onClose: { self.activeOverlay = nil },
+                    onClose: { closeOverlay() },
                     onCreateGroup: {
                         newGroupName = ""
                         self.activeOverlay = .newGroup
                     },
                     onSelectGroup: { group in
                         viewModel.moveSelection(to: group.id)
-                        self.activeOverlay = nil
+                        closeOverlay()
                     }
                 )
                 .transition(.move(edge: .bottom))
@@ -331,11 +345,11 @@ struct LibraryView: View {
                 LibraryNewGroupPanel(
                     name: $newGroupName,
                     selectedCount: viewModel.selectedBookIDs.count,
-                    onClose: { self.activeOverlay = nil },
+                    onClose: { closeOverlay() },
                     onConfirm: {
                         viewModel.createGroup(named: newGroupName)
                         newGroupName = ""
-                        self.activeOverlay = nil
+                        closeOverlay()
                     }
                 )
                 .transition(.move(edge: .bottom))
@@ -343,6 +357,28 @@ struct LibraryView: View {
         }
     }
 
+    @ViewBuilder
+    private var bookActionButtons: some View {
+        if let actionBook {
+            Button(viewModel.isPinned(actionBook) ? "取消置顶" : "置顶") {
+                viewModel.togglePinned(actionBook)
+                self.actionBook = nil
+            }
+            Button("移动到分组") {
+                viewModel.prepareSingleBookMove(actionBook)
+                self.actionBook = nil
+                activeOverlay = .moveToGroup
+            }
+            Button("取消", role: .cancel) {
+                self.actionBook = nil
+            }
+        }
+    }
+
+    private func closeOverlay() {
+        activeOverlay = nil
+        viewModel.clearTransientSelectionIfNeeded()
+    }
 }
 
 private enum LibraryPalette {
@@ -554,7 +590,9 @@ private struct FilterChip: View {
 private struct LibraryBookGridItemView: View {
     let book: BookRecord
     let fileStore: BookFileStore
+    let isPinned: Bool
     let onOpen: () -> Void
+    let onMore: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -569,38 +607,56 @@ private struct LibraryBookGridItemView: View {
                                     .stroke(Color.white.opacity(0.10), lineWidth: 1)
                             )
 
-                        Image(systemName: "arrow.up.to.line.compact")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 24, height: 24)
-                            .background(Color.black.opacity(0.45), in: UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: 5)))
+                        if isPinned {
+                            Image(systemName: "arrow.up.to.line.compact")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 24, height: 24)
+                                .background(Color.black.opacity(0.45), in: UnevenRoundedRectangle(cornerRadii: .init(bottomLeading: 5)))
+                                .accessibilityIdentifier("library.book.pinned.\(book.id.uuidString)")
+                        }
                     }
 
                     Text(book.title)
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(LibraryPalette.primary)
-                        .lineLimit(2)
+                        .lineLimit(1)
                         .minimumScaleFactor(0.78)
-                        .frame(minHeight: 42, alignment: .topLeading)
+                        .frame(height: 22, alignment: .leading)
                 }
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("library.book.\(book.id.uuidString)")
 
             HStack(spacing: 5) {
-                Text("已读")
-                    .foregroundStyle(LibraryPalette.secondary)
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-                Text("\(Int((book.readingProgress * 100).rounded()))%")
-                    .foregroundStyle(LibraryPalette.accent)
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                HStack(spacing: 3) {
+                    Text("已读")
+                        .foregroundStyle(LibraryPalette.secondary)
+                    Text("\(progressPercent)%")
+                        .foregroundStyle(LibraryPalette.accent)
+                }
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 2)
+                Button(action: onMore) {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 17, weight: .bold))
+                        .rotationEffect(.degrees(90))
+                        .foregroundStyle(LibraryPalette.muted)
+                        .frame(width: 26, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("更多")
+                .accessibilityIdentifier("library.more.book.\(book.id.uuidString)")
             }
             .font(.system(size: 14, weight: .medium))
         }
         .contentShape(Rectangle())
+    }
+
+    private var progressPercent: Int {
+        Int((book.readingProgress * 100).rounded())
     }
 }
 
@@ -608,6 +664,7 @@ private struct LibraryBookRowView: View {
     let book: BookRecord
     let fileStore: BookFileStore
     let onOpen: () -> Void
+    let onMore: () -> Void
 
     var body: some View {
         HStack(spacing: 16) {
@@ -645,13 +702,17 @@ private struct LibraryBookRowView: View {
 
             Spacer(minLength: 12)
 
-            HStack(spacing: 18) {
-                Image(systemName: "book")
-                    .font(.system(size: 23, weight: .medium))
-                    .foregroundStyle(.white)
-                    .frame(width: 48, height: 48)
-                    .background(.black, in: Circle())
+            Button(action: onMore) {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 19, weight: .bold))
+                    .rotationEffect(.degrees(90))
+                    .foregroundStyle(LibraryPalette.muted)
+                    .frame(width: 44, height: 48)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("更多")
+            .accessibilityIdentifier("library.more.book.\(book.id.uuidString)")
         }
         .contentShape(Rectangle())
     }

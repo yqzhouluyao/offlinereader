@@ -228,6 +228,7 @@ final class AppContainer {
                     }
                     libraryGroupStore.save(groups)
                     readerBookmarkStore.reset(bookID: bookID)
+                    LibraryPinnedBookStorage.remove(bookID: bookID)
                 }
                 try await fileStore.deleteInstalledFiles(bookID: bookID)
             }
@@ -290,6 +291,8 @@ final class AppContainer {
             return
         }
         libraryGroupStore.reset()
+        LibraryPinnedBookStorage.reset()
+        UserDefaults.standard.removeObject(forKey: LibraryViewModel.shelfModeKey)
         seedUITestingLibraryIfNeeded()
     }
 
