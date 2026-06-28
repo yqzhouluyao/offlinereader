@@ -52,6 +52,54 @@ struct ReaderPreferencesSnapshot: Codable, Equatable, Sendable {
     var pageTurnMode: PageTurnMode = .verticalScroll
     var speechEngine: SpeechEngine = .system
     var speechVoiceIdentifier: String = "zh-CN-XiaoxiaoNeural"
+    var speechRate: Double = 1.0
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case theme
+        case font
+        case fontSizeLevel
+        case lineHeightLevel
+        case marginLevel
+        case pageTurnMode
+        case speechEngine
+        case speechVoiceIdentifier
+        case speechRate
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        theme = try values.decodeIfPresent(Theme.self, forKey: .theme) ?? .day
+        font = try values.decodeIfPresent(FontChoice.self, forKey: .font) ?? .publisher
+        fontSizeLevel = try values.decodeIfPresent(Level.self, forKey: .fontSizeLevel) ?? .three
+        lineHeightLevel = try values.decodeIfPresent(Level.self, forKey: .lineHeightLevel) ?? .three
+        marginLevel = try values.decodeIfPresent(Level.self, forKey: .marginLevel) ?? .three
+        pageTurnMode = try values.decodeIfPresent(PageTurnMode.self, forKey: .pageTurnMode) ?? .verticalScroll
+        speechEngine = try values.decodeIfPresent(SpeechEngine.self, forKey: .speechEngine) ?? .system
+        speechVoiceIdentifier = try values.decodeIfPresent(String.self, forKey: .speechVoiceIdentifier) ?? "zh-CN-XiaoxiaoNeural"
+        speechRate = Self.normalizedSpeechRate(try values.decodeIfPresent(Double.self, forKey: .speechRate) ?? 1.0)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(version, forKey: .version)
+        try values.encode(theme, forKey: .theme)
+        try values.encode(font, forKey: .font)
+        try values.encode(fontSizeLevel, forKey: .fontSizeLevel)
+        try values.encode(lineHeightLevel, forKey: .lineHeightLevel)
+        try values.encode(marginLevel, forKey: .marginLevel)
+        try values.encode(pageTurnMode, forKey: .pageTurnMode)
+        try values.encode(speechEngine, forKey: .speechEngine)
+        try values.encode(speechVoiceIdentifier, forKey: .speechVoiceIdentifier)
+        try values.encode(Self.normalizedSpeechRate(speechRate), forKey: .speechRate)
+    }
+
+    static func normalizedSpeechRate(_ value: Double) -> Double {
+        min(max(value, 0.7), 3.0)
+    }
 }
 
 @MainActor

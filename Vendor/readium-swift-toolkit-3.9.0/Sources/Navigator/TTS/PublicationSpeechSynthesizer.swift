@@ -42,12 +42,17 @@ public class PublicationSpeechSynthesizer: Loggable {
         /// Identifier for the voice used to speak the utterances.
         public var voiceIdentifier: String?
 
+        /// Playback speed multiplier.
+        public var rateMultiplier: Double
+
         public init(
             defaultLanguage: Language? = nil,
-            voiceIdentifier: String? = nil
+            voiceIdentifier: String? = nil,
+            rateMultiplier: Double = 1.0
         ) {
             self.defaultLanguage = defaultLanguage
             self.voiceIdentifier = voiceIdentifier
+            self.rateMultiplier = min(max(rateMultiplier, 0.7), 3.0)
         }
     }
 
@@ -231,6 +236,13 @@ public class PublicationSpeechSynthesizer: Loggable {
         }
     }
 
+    /// Updates the playback speed. Engines backed by audio players apply it to the current utterance immediately.
+    @MainActor
+    public func updateRateMultiplier(_ rateMultiplier: Double) {
+        config.rateMultiplier = min(max(rateMultiplier, 0.7), 3.0)
+        engine.updatePlaybackRate(config.rateMultiplier)
+    }
+
     /// Skips to the previous utterance.
     public func previous() {
         currentTask?.cancel()
@@ -288,7 +300,8 @@ public class PublicationSpeechSynthesizer: Loggable {
             TTSUtterance(
                 text: utterance.text,
                 delay: 0,
-                voiceOrLanguage: voiceOrLanguage(for: utterance)
+                voiceOrLanguage: voiceOrLanguage(for: utterance),
+                rateMultiplier: config.rateMultiplier
             ),
             onSpeakRange: { [weak self] range in
                 guard let self = self else {
@@ -349,7 +362,8 @@ public class PublicationSpeechSynthesizer: Loggable {
                 TTSUtterance(
                     text: utterance.text,
                     delay: 0,
-                    voiceOrLanguage: voiceOrLanguage(for: utterance)
+                    voiceOrLanguage: voiceOrLanguage(for: utterance),
+                    rateMultiplier: config.rateMultiplier
                 )
             }
         )

@@ -72,6 +72,44 @@ final class UploadSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testWiFiTransferFallsBackWhenPreferredPortIsUnavailable() async throws {
+        let preferredPort: UInt16 = 18180
+        let fallbackPorts = (18181 ... 18190).map { UInt16($0) }
+        let firstService = WiFiTransferService(
+            fileStore: try BookFileStore(),
+            importService: RecordingImportService(),
+            addressResolver: { "127.0.0.1" },
+            port: preferredPort,
+            fallbackPorts: fallbackPorts
+        )
+        let secondService = WiFiTransferService(
+            fileStore: try BookFileStore(),
+            importService: RecordingImportService(),
+            addressResolver: { "127.0.0.1" },
+            port: preferredPort,
+            fallbackPorts: fallbackPorts
+        )
+
+        do {
+            let firstEndpoint = try await firstService.start()
+            let secondEndpoint = try await secondService.start()
+            let firstPort = try XCTUnwrap(firstEndpoint.url.port)
+            let secondPort = try XCTUnwrap(secondEndpoint.url.port)
+
+            XCTAssertNotEqual(firstPort, secondPort)
+            XCTAssertTrue(([Int(preferredPort)] + fallbackPorts.map { Int($0) }).contains(secondPort))
+            _ = try await Self.transferToken(from: secondEndpoint.url)
+
+            try await secondService.stop()
+            try await firstService.stop()
+        } catch {
+            try? await secondService.stop()
+            try? await firstService.stop()
+            throw error
+        }
+    }
+
+    @MainActor
     func testWiFiTransferListsDownloadsAndDeletesLibraryFiles() async throws {
         let importService = RecordingImportService()
         let fileStore = try BookFileStore()

@@ -110,6 +110,10 @@ private enum EPUBVisualSpeechEngine {
             engine.stopPlayback()
         }
     }
+
+    func updatePlaybackRate(_ rateMultiplier: Double) {
+        ttsEngine.updatePlaybackRate(rateMultiplier)
+    }
 }
 
 enum NarrationSpeechConfiguration {
@@ -117,20 +121,27 @@ enum NarrationSpeechConfiguration {
 
     static func publicationConfiguration(
         publicationLanguage: Language?,
-        voiceIdentifier: String? = nil
+        voiceIdentifier: String? = nil,
+        rateMultiplier: Double = 1.0
     ) -> PublicationSpeechSynthesizer.Configuration {
         let defaultLanguage = publicationLanguage ?? Language(code: .bcp47(preferredLanguageIdentifier(for: nil)))
         return PublicationSpeechSynthesizer.Configuration(
             defaultLanguage: defaultLanguage,
-            voiceIdentifier: voiceIdentifier
+            voiceIdentifier: voiceIdentifier,
+            rateMultiplier: rateMultiplier
         )
     }
 
-    static func configure(_ utterance: AVSpeechUtterance, text: String? = nil, languageHint: String? = nil) {
+    static func configure(
+        _ utterance: AVSpeechUtterance,
+        text: String? = nil,
+        languageHint: String? = nil,
+        rateMultiplier: Double = 1.0
+    ) {
         let spokenText = text ?? utterance.speechString
         let languageIdentifier = preferredLanguageIdentifier(for: spokenText, languageHint: languageHint)
         utterance.voice = preferredVoice(for: languageIdentifier)
-        utterance.rate = preferredRate(for: spokenText)
+        utterance.rate = preferredRate(for: spokenText, rateMultiplier: rateMultiplier)
         utterance.pitchMultiplier = preferredPitch
         utterance.volume = 1
         utterance.preUtteranceDelay = 0
@@ -188,12 +199,13 @@ enum NarrationSpeechConfiguration {
 
     private static let preferredPitch: Float = 1.03
 
-    private static func preferredRate(for text: String) -> Float {
+    private static func preferredRate(for text: String, rateMultiplier: Double = 1.0) -> Float {
         let containsCJK = text.containsCJKText
         let base = containsCJK
             ? AVSpeechUtteranceDefaultSpeechRate * 0.86
             : AVSpeechUtteranceDefaultSpeechRate * 0.90
-        return base.clamped(to: AVSpeechUtteranceMinimumSpeechRate ... AVSpeechUtteranceMaximumSpeechRate)
+        return (base * Float(ReaderPreferencesSnapshot.normalizedSpeechRate(rateMultiplier)))
+            .clamped(to: AVSpeechUtteranceMinimumSpeechRate ... AVSpeechUtteranceMaximumSpeechRate)
     }
 
     private static func postUtteranceDelay(for text: String) -> TimeInterval {
@@ -431,7 +443,8 @@ final class NarrationExpressiveAVTTSEngine: NSObject, TTSEngine, AVSpeechSynthes
         NarrationSpeechConfiguration.configure(
             speech,
             text: activeRequest.text,
-            languageHint: activeRequest.languageIdentifier
+            languageHint: activeRequest.languageIdentifier,
+            rateMultiplier: activeRequest.rateMultiplier
         )
         if let explicitVoice,
            NarrationSpeechConfiguration.voice(
@@ -589,10 +602,12 @@ private struct NarrationSpeechRequest: Sendable {
     let delay: TimeInterval
     let voiceIdentifier: String?
     let languageIdentifier: String?
+    let rateMultiplier: Double
 
     init(_ utterance: TTSUtterance) {
         text = utterance.text
         delay = utterance.delay
+        rateMultiplier = utterance.rateMultiplier
         switch utterance.voiceOrLanguage {
         case .left(let voice):
             voiceIdentifier = voice.identifier
@@ -716,6 +731,7 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
         return await speakText(
             utterance.text,
             language: utterance.language,
+            rateMultiplier: utterance.rateMultiplier,
             speakRangeHandler: speakRangeHandler
         )
     }
@@ -738,11 +754,13 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
     func speakText(
         _ text: String,
         language: Language? = nil,
+        rateMultiplier: Double = 1.0,
         onSpeakRange: @escaping (Range<String.Index>) -> Void
     ) async -> Result<Void, TTSError> {
         await speakText(
             text,
             language: language,
+            rateMultiplier: rateMultiplier,
             speakRangeHandler: NarrationSpeakRangeHandler(onSpeakRange)
         )
     }
@@ -751,6 +769,7 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
     private func speakText(
         _ text: String,
         language: Language?,
+        rateMultiplier: Double = 1.0,
         speakRangeHandler: NarrationSpeakRangeHandler
     ) async -> Result<Void, TTSError> {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -765,7 +784,12 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
                 "Edge Read Aloud trace: engine speak start voice=\(voice, privacy: .public) language=\(languageCode, privacy: .public) chars=\(trimmed.count, privacy: .public) utf8=\(trimmed.utf8.count, privacy: .public) fp=\(EdgeReadAloudClient.fingerprint(for: trimmed), privacy: .public)"
             )
             let audio = try await EdgeReadAloudClient.synthesize(text: text, voiceIdentifier: voice)
-            return await play(audio: audio, text: text, speakRangeHandler: speakRangeHandler)
+            return await play(
+                audio: audio,
+                text: text,
+                rateMultiplier: rateMultiplier,
+                speakRangeHandler: speakRangeHandler
+            )
         } catch is CancellationError {
             stopPlayback()
             return .success(())
@@ -786,6 +810,15 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
             return false
         }
         return !audioPlayer.isPlaying && continuation != nil
+    }
+
+    @MainActor
+    func updatePlaybackRate(_ rateMultiplier: Double) {
+        guard let audioPlayer else {
+            return
+        }
+        audioPlayer.enableRate = true
+        audioPlayer.rate = Float(ReaderPreferencesSnapshot.normalizedSpeechRate(rateMultiplier))
     }
 
     @MainActor
@@ -864,6 +897,7 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
     private func play(
         audio: Data,
         text: String,
+        rateMultiplier: Double,
         speakRangeHandler: NarrationSpeakRangeHandler
     ) async -> Result<Void, TTSError> {
         stopPlayback()
@@ -875,11 +909,17 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
             let player = try AVAudioPlayer(data: audio)
             audioPlayer = player
             player.delegate = self
+            player.enableRate = true
+            player.rate = Float(ReaderPreferencesSnapshot.normalizedSpeechRate(rateMultiplier))
             player.prepareToPlay()
             AppLog.reader.error(
                 "Edge Read Aloud trace: player ready duration=\(player.duration, privacy: .public) channels=\(player.numberOfChannels, privacy: .public) deviceTime=\(player.deviceCurrentTime, privacy: .public)"
             )
-            scheduleRangeUpdates(for: text, duration: player.duration, speakRangeHandler: speakRangeHandler)
+            scheduleRangeUpdates(
+                for: text,
+                player: player,
+                speakRangeHandler: speakRangeHandler
+            )
 
             return await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
@@ -904,17 +944,16 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
     @MainActor
     private func scheduleRangeUpdates(
         for text: String,
-        duration: TimeInterval,
+        player: AVAudioPlayer,
         speakRangeHandler: NarrationSpeakRangeHandler
     ) {
         let chunks = NarrationTextChunker.chunks(in: text)
         let ranges = chunks.isEmpty ? [text.startIndex ..< text.endIndex] : chunks.map(\.range)
         let totalCharacters = max(text.count, 1)
-        let duration = max(duration, 0.6)
+        let duration = max(player.duration, 0.6)
 
         rangeTask?.cancel()
         rangeTask = Task { @MainActor in
-            let start = ContinuousClock.now
             for range in ranges {
                 guard !Task.isCancelled else {
                     return
@@ -922,10 +961,8 @@ final class EdgeReadAloudTTSEngine: NSObject, TTSEngine, AVAudioPlayerDelegate, 
 
                 let offset = text.distance(from: text.startIndex, to: range.lowerBound)
                 let targetSeconds = duration * Double(offset) / Double(totalCharacters)
-                let elapsed = start.duration(to: .now).components.seconds
-                if targetSeconds > Double(elapsed) {
-                    let delay = UInt64((targetSeconds - Double(elapsed)) * 1_000_000_000)
-                    try? await Task.sleep(nanoseconds: delay)
+                while !Task.isCancelled, player.currentTime + 0.02 < targetSeconds {
+                    try? await Task.sleep(for: .milliseconds(80))
                 }
 
                 guard !Task.isCancelled else {
@@ -1987,10 +2024,13 @@ protocol ReaderSessionProtocol: AnyObject {
     func totalPageCount() async -> Int?
     func search(_ query: String) async -> [ReaderSearchResultItem]
     func go(to locatorData: Data) async throws
+    func showSearchHighlight(locatorData: Data, query: String) async
     func goToTableOfContentsItem(_ itemID: String) async throws
     func applyPreferences(_ snapshot: ReaderPreferencesSnapshot) async
     func startListening() async
     func pauseOrResumeListening()
+    func skipToPreviousListening()
+    func skipToNextListening()
     func focusListeningPosition() async
     func stopListening()
     func close() async
@@ -2015,10 +2055,12 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
     private var pageTurnMode: ReaderPreferencesSnapshot.PageTurnMode
     private var speechEngine: ReaderPreferencesSnapshot.SpeechEngine
     private var speechVoiceIdentifier: String
+    private var speechRate: Double
     private var speechSynthesizer: PublicationSpeechSynthesizer?
     private var currentSpokenLocatorData: Data?
     private var currentSpokenDecorationLocatorData: Data?
     private var spokenDOMHighlightGeneration = 0
+    private var searchHighlightVisibleSince: Date?
     private var visualSpeechTask: Task<Void, Never>?
     private var visualSpeechEngine: EPUBVisualSpeechEngine?
     private var visualSpeechCurrentChunk: EPUBVisualSpeechChunk?
@@ -2051,6 +2093,7 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         self.pageTurnMode = preferences.pageTurnMode
         self.speechEngine = preferences.speechEngine
         self.speechVoiceIdentifier = preferences.speechVoiceIdentifier
+        self.speechRate = preferences.speechRate
         let locator = try initialLocatorData.map { try LocatorCoding.decode($0) }
         navigator = try EPUBNavigatorViewController(
             publication: publicationHandle.publication,
@@ -2107,6 +2150,14 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         }
     }
 
+    func showSearchHighlight(locatorData: Data, query: String) async {
+        guard let locator = try? LocatorCoding.decode(locatorData) else {
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(220))
+        applySearchDOMHighlight(to: locator, query: query)
+    }
+
     func goToTableOfContentsItem(_ itemID: String) async throws {
         guard let link = tocLinksByID[itemID] else {
             throw ReaderAppError.unknown
@@ -2123,6 +2174,14 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         pageTurnMode = snapshot.pageTurnMode
         speechEngine = snapshot.speechEngine
         speechVoiceIdentifier = snapshot.speechVoiceIdentifier
+        speechRate = snapshot.speechRate
+        speechSynthesizer?.config = NarrationSpeechConfiguration.publicationConfiguration(
+            publicationLanguage: publicationHandle.publication.metadata.language,
+            voiceIdentifier: speechVoiceIdentifier,
+            rateMultiplier: speechRate
+        )
+        speechSynthesizer?.updateRateMultiplier(speechRate)
+        visualSpeechEngine?.updatePlaybackRate(speechRate)
         if didChangeSpeechEngine {
             stopVisualSpeech()
             speechSynthesizer?.stop()
@@ -2138,6 +2197,8 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
             return
         }
 
+        clearSearchHighlight()
+        clearSpokenDecoration()
         await startListening(from: nil, using: synthesizer)
     }
 
@@ -2148,6 +2209,20 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         } else {
             speechSynthesizer?.pauseOrResume()
         }
+    }
+
+    func skipToPreviousListening() {
+        guard visualSpeechEngine == nil else {
+            return
+        }
+        speechSynthesizer?.previous()
+    }
+
+    func skipToNextListening() {
+        guard visualSpeechEngine == nil else {
+            return
+        }
+        speechSynthesizer?.next()
     }
 
     func focusListeningPosition() async {
@@ -2200,7 +2275,8 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
             publication: publicationHandle.publication,
             config: NarrationSpeechConfiguration.publicationConfiguration(
                 publicationLanguage: publicationHandle.publication.metadata.language,
-                voiceIdentifier: speechVoiceIdentifier
+                voiceIdentifier: speechVoiceIdentifier,
+                rateMultiplier: speechRate
             ),
             engineFactory: { [speechEngine, speechVoiceIdentifier] in
                 switch speechEngine {
@@ -2232,6 +2308,7 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         speechSynthesizer = nil
         currentSpokenLocatorData = nil
         currentSpokenDecorationLocatorData = nil
+        clearSearchHighlight()
         clearSpokenDecoration()
         stopVisualSpeech(clearHighlight: false)
 
@@ -2312,7 +2389,12 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         } else {
             voiceOrLanguage = .right(language)
         }
-        return TTSUtterance(text: chunk.text, delay: 0.02, voiceOrLanguage: voiceOrLanguage)
+        return TTSUtterance(
+            text: chunk.text,
+            delay: 0.02,
+            voiceOrLanguage: voiceOrLanguage,
+            rateMultiplier: speechRate
+        )
     }
 
     private func notifyVisualSpeechState(isPlaying: Bool) {
@@ -2471,12 +2553,12 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
     ) {
         let spokenLocator = rangeLocator ?? utterance.locator
         let locatorData = try? LocatorCoding.encode(spokenLocator)
-        let shouldRenderDOMHighlight = rangeLocator != nil || !isPlaying
         let shouldApplyReadiumDecoration = rangeLocator != nil || !isPlaying
-        if shouldRenderDOMHighlight {
+        if shouldApplyReadiumDecoration {
             currentSpokenLocatorData = locatorData
         }
         if shouldApplyReadiumDecoration, locatorData != currentSpokenDecorationLocatorData {
+            clearVisualSpeechHighlight()
             currentSpokenDecorationLocatorData = locatorData
             navigator.apply(
                 decorations: [
@@ -2489,12 +2571,8 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
                 in: Self.ttsDecorationGroup
             )
         }
-
-        if shouldRenderDOMHighlight {
-            applySpokenDOMHighlight(
-                to: spokenLocator,
-                scrollPolicy: rangeLocator == nil ? .none : .threshold
-            )
+        if isPlaying, rangeLocator != nil {
+            applySpokenDecorationViewportAdjustment(scrollPolicy: .threshold)
         }
 
         onListeningStateChanged?(
@@ -2519,12 +2597,67 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         clearVisualSpeechHighlight()
     }
 
-    private func navigateToSpokenLocator(_ locator: Locator) async {
-        _ = await navigator.go(to: locator, options: .none)
-        applySpokenDOMHighlight(to: locator, scrollPolicy: .center)
+    private func clearSearchHighlight() {
+        searchHighlightVisibleSince = nil
+        navigator.apply(decorations: [], in: Self.searchDecorationGroup)
+        Task { @MainActor [weak self] in
+            _ = await self?.navigator.evaluateJavaScript(Self.clearSearchHighlightScript)
+        }
     }
 
-    private func applySpokenDOMHighlight(to locator: Locator, scrollPolicy: SpokenHighlightScrollPolicy) {
+    private func clearSearchHighlightFromUserActivation() {
+        if let searchHighlightVisibleSince,
+           Date().timeIntervalSince(searchHighlightVisibleSince) < 0.8 {
+            return
+        }
+        clearSearchHighlight()
+    }
+
+    private func navigateToSpokenLocator(_ locator: Locator) async {
+        _ = await navigator.go(to: locator, options: .none)
+        applySpokenDOMHighlight(to: locator, scrollPolicy: .center, drawsHighlight: true)
+    }
+
+    private func applySearchDOMHighlight(to locator: Locator, query: String) {
+        let highlight = locator.text.highlight?.readerCollapsedWhitespace.nilIfEmpty
+        let selector = locator.locations.cssSelector
+        let topInset = ReaderChromeLayoutMetrics.topReadingInset(for: navigator.view)
+        let bottomInset = ReaderChromeLayoutMetrics.bottomReadingInset(for: navigator.view)
+        let script = Self.searchDOMHighlightScript(
+            text: highlight ?? query,
+            fallbackQuery: query,
+            selector: selector,
+            topInset: topInset,
+            bottomInset: bottomInset
+        )
+        searchHighlightVisibleSince = Date()
+        navigator.apply(
+            decorations: [
+                Decoration(
+                    id: Self.searchDecorationID,
+                    locator: locator,
+                    style: .highlight(tint: Self.searchHighlightTint)
+                )
+            ],
+            in: Self.searchDecorationGroup
+        )
+        Task { @MainActor [weak self] in
+            switch await self?.navigator.evaluateJavaScript(script) {
+            case .success:
+                break
+            case .failure(let error):
+                AppLog.reader.error("EPUB search DOM highlight failed: \(String(describing: error), privacy: .public)")
+            case nil:
+                break
+            }
+        }
+    }
+
+    private func applySpokenDOMHighlight(
+        to locator: Locator,
+        scrollPolicy: SpokenHighlightScrollPolicy,
+        drawsHighlight: Bool
+    ) {
         let text = locator.text.highlight?.readerCollapsedWhitespace.nilIfEmpty
         let selector = locator.locations.cssSelector
         guard text != nil || selector != nil else {
@@ -2540,6 +2673,7 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
             topInset: topInset,
             bottomInset: bottomInset,
             scrollPolicy: scrollPolicy,
+            drawsHighlight: drawsHighlight,
             generation: generation
         )
         Task { @MainActor [weak self] in
@@ -2550,6 +2684,31 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
                 AppLog.reader.error("EPUB spoken DOM highlight failed: \(String(describing: error), privacy: .public)")
             case nil:
                 break
+            }
+        }
+    }
+
+    private func applySpokenDecorationViewportAdjustment(scrollPolicy: SpokenHighlightScrollPolicy) {
+        let topInset = ReaderChromeLayoutMetrics.topReadingInset(for: navigator.view)
+        let bottomInset = ReaderChromeLayoutMetrics.bottomReadingInset(for: navigator.view)
+        spokenDOMHighlightGeneration += 1
+        let generation = spokenDOMHighlightGeneration
+        let script = Self.spokenDecorationViewportScript(
+            topInset: topInset,
+            bottomInset: bottomInset,
+            scrollPolicy: scrollPolicy,
+            generation: generation
+        )
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard let self, self.spokenDOMHighlightGeneration == generation else {
+                return
+            }
+            switch await self.navigator.evaluateJavaScript(script) {
+            case .success:
+                break
+            case .failure(let error):
+                AppLog.reader.error("EPUB spoken decoration scroll failed: \(String(describing: error), privacy: .public)")
             }
         }
     }
@@ -2651,7 +2810,10 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
 
     private static let ttsDecorationGroup: DecorationGroup = "offline-reader-tts"
     private static let ttsDecorationID = "offline-reader-current-utterance"
+    private static let searchDecorationGroup: DecorationGroup = "offline-reader-search"
+    private static let searchDecorationID = "offline-reader-search-result"
     static let ttsHighlightTint = UIColor(red: 0.55, green: 0.78, blue: 0.96, alpha: 1)
+    static let searchHighlightTint = UIColor(red: 0.55, green: 0.78, blue: 0.96, alpha: 1)
     static let ttsHighlightFill = UIColor(red: 0.55, green: 0.78, blue: 0.96, alpha: 0.46)
     static let ttsHighlightOverlayFill = UIColor(red: 0.48, green: 0.76, blue: 0.98, alpha: 0.38)
 
@@ -3152,12 +3314,337 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         """
     }
 
+    private static let clearSearchHighlightScript = """
+    (() => {
+      const existing = document.getElementById("offline-reader-search-highlight-layer");
+      if (existing && existing.parentNode) {
+        existing.parentNode.removeChild(existing);
+      }
+      return true;
+    })();
+    """
+
+    private static func searchDOMHighlightScript(
+        text: String,
+        fallbackQuery: String,
+        selector: String?,
+        topInset: CGFloat,
+        bottomInset: CGFloat
+    ) -> String {
+        let textLiteral = javaScriptLiteral(text)
+        let queryLiteral = javaScriptLiteral(fallbackQuery)
+        let selectorLiteral = selector.map(javaScriptLiteral) ?? "null"
+        let topInsetValue = String(format: "%.3f", Double(topInset))
+        let bottomInsetValue = String(format: "%.3f", Double(bottomInset))
+        return """
+        (() => {
+          const layerID = "offline-reader-search-highlight-layer";
+          const selector = \(selectorLiteral);
+          const needles = [\(textLiteral), \(queryLiteral)]
+            .map(value => String(value || "").replace(/\\s+/g, " ").trim())
+            .filter(Boolean);
+          const existing = document.getElementById(layerID);
+          if (existing && existing.parentNode) {
+            existing.parentNode.removeChild(existing);
+          }
+          if (!needles.length) {
+            return false;
+          }
+
+          function safeQuerySelector(value) {
+            if (!value) {
+              return null;
+            }
+            try {
+              return document.querySelector(value);
+            } catch (_) {
+              return null;
+            }
+          }
+
+          function textNodes(root) {
+            const nodes = [];
+            const walker = document.createTreeWalker(root || document.body, NodeFilter.SHOW_TEXT, {
+              acceptNode(node) {
+                return node.nodeValue && node.nodeValue.trim()
+                  ? NodeFilter.FILTER_ACCEPT
+                  : NodeFilter.FILTER_REJECT;
+              }
+            });
+            while (walker.nextNode()) {
+              nodes.push(walker.currentNode);
+            }
+            return nodes;
+          }
+
+          function buildIndex(root) {
+            let value = "";
+            const map = [];
+            for (const node of textNodes(root)) {
+              const text = String(node.nodeValue || "");
+              for (let index = 0; index < text.length; index += 1) {
+                const character = text[index];
+                if (/\\s/.test(character)) {
+                  if (value.length > 0 && value[value.length - 1] !== " ") {
+                    value += " ";
+                    map.push({ node, offset: index });
+                  }
+                } else {
+                  value += character;
+                  map.push({ node, offset: index });
+                }
+              }
+            }
+            return { value: value.trim().toLowerCase(), map };
+          }
+
+          function rangeFromIndexedValue(indexed, start, length) {
+            const startPoint = indexed.map[start];
+            const endPoint = indexed.map[Math.min(start + length - 1, indexed.map.length - 1)];
+            if (!startPoint || !endPoint) {
+              return null;
+            }
+            const range = document.createRange();
+            range.setStart(startPoint.node, startPoint.offset);
+            range.setEnd(endPoint.node, endPoint.offset + 1);
+            return range.collapsed ? null : range;
+          }
+
+          function rangesFor(root) {
+            const indexed = buildIndex(root);
+            const ranges = [];
+            for (const needle of needles) {
+              let query = needle.toLowerCase();
+              let start = indexed.value.indexOf(query);
+              if (start < 0 && query.length > 18) {
+                query = query.slice(0, Math.min(42, query.length));
+                start = indexed.value.indexOf(query);
+              }
+              const length = query.length;
+              while (start >= 0) {
+                const range = rangeFromIndexedValue(indexed, start, length);
+                if (range) {
+                  ranges.push(range);
+                }
+                start = indexed.value.indexOf(query, start + Math.max(1, length));
+              }
+            }
+            return ranges;
+          }
+
+          function scrollByDelta(delta) {
+            if (Math.abs(delta) <= 2) {
+              return;
+            }
+            const scroller = document.scrollingElement || document.documentElement || document.body;
+            const before = scroller ? scroller.scrollTop : window.scrollY || 0;
+            window.scrollBy(0, delta);
+            if (scroller && typeof scroller.scrollTop === "number") {
+              scroller.scrollTop = before + delta;
+            }
+          }
+
+          function visibleRectsFor(range) {
+            return Array.from(range.getClientRects()).filter(rect =>
+              rect.width > 0
+                && rect.height > 0
+                && rect.bottom > 0
+                && rect.top < window.innerHeight
+                && rect.right > 0
+                && rect.left < window.innerWidth
+            );
+          }
+
+          function visibleScore(range) {
+            const rects = visibleRectsFor(range);
+            if (!rects.length) {
+              return null;
+            }
+            const top = rects.reduce((value, rect) => Math.min(value, rect.top), Infinity);
+            const bottom = rects.reduce((value, rect) => Math.max(value, rect.bottom), -Infinity);
+            const center = (top + bottom) / 2;
+            const readableTop = \(topInsetValue);
+            const readableBottom = Math.max(readableTop + 80, window.innerHeight - \(bottomInsetValue));
+            const targetCenter = readableTop + (readableBottom - readableTop) * 0.50;
+            return Math.abs(center - targetCenter);
+          }
+
+          function bestRangeFor(root) {
+            const ranges = rangesFor(root);
+            let best = null;
+            let bestScore = Infinity;
+            for (const range of ranges) {
+              const score = visibleScore(range);
+              if (score !== null && score < bestScore) {
+                best = range;
+                bestScore = score;
+              }
+            }
+            return best || ranges[0] || null;
+          }
+
+          function draw(range) {
+            if (!range) {
+              return false;
+            }
+            const rectsForScroll = Array.from(range.getClientRects()).filter(rect => rect.width > 0 && rect.height > 0);
+            if (!rectsForScroll.length) {
+              return false;
+            }
+            const top = rectsForScroll.reduce((value, rect) => Math.min(value, rect.top), Infinity);
+            const bottom = rectsForScroll.reduce((value, rect) => Math.max(value, rect.bottom), -Infinity);
+            const readableTop = \(topInsetValue);
+            const readableBottom = Math.max(readableTop + 80, window.innerHeight - \(bottomInsetValue));
+            const targetCenter = readableTop + (readableBottom - readableTop) * 0.50;
+            scrollByDelta(((top + bottom) / 2) - targetCenter);
+
+            const rects = visibleRectsFor(range);
+            if (!rects.length) {
+              return false;
+            }
+
+            const layer = document.createElement("div");
+            layer.id = layerID;
+            layer.setAttribute("aria-hidden", "true");
+            layer.style.position = "fixed";
+            layer.style.left = "0";
+            layer.style.top = "0";
+            layer.style.width = "100vw";
+            layer.style.height = "100vh";
+            layer.style.pointerEvents = "none";
+            layer.style.zIndex = "2147483646";
+            for (const rect of rects) {
+              const item = document.createElement("div");
+              item.style.position = "absolute";
+              item.style.left = Math.max(0, rect.left - 3) + "px";
+              item.style.top = Math.max(0, rect.top - 2) + "px";
+              item.style.width = Math.min(window.innerWidth, rect.width + 6) + "px";
+              item.style.height = (rect.height + 4) + "px";
+              item.style.background = "rgba(144, 211, 255, 0.46)";
+              item.style.borderRadius = "3px";
+              layer.appendChild(item);
+            }
+            document.documentElement.appendChild(layer);
+            return true;
+          }
+
+          const roots = [];
+          const selected = safeQuerySelector(selector);
+          if (selected) {
+            roots.push(selected);
+          }
+          roots.push(document.body);
+          for (const root of roots) {
+            if (draw(bestRangeFor(root))) {
+              return true;
+            }
+          }
+          return false;
+        })();
+        """
+    }
+
+    private static func spokenDecorationViewportScript(
+        topInset: CGFloat,
+        bottomInset: CGFloat,
+        scrollPolicy: SpokenHighlightScrollPolicy,
+        generation: Int
+    ) -> String {
+        let topInsetValue = String(format: "%.3f", Double(topInset))
+        let bottomInsetValue = String(format: "%.3f", Double(bottomInset))
+        let scrollPolicyLiteral = javaScriptLiteral(scrollPolicy.rawValue)
+        let decorationGroupLiteral = javaScriptLiteral(String(Self.ttsDecorationGroup))
+        return """
+        (() => {
+          const decorationGroup = \(decorationGroupLiteral);
+          const scrollPolicy = \(scrollPolicyLiteral);
+          const generation = \(generation);
+          const generationKey = "__offlineReaderTTSViewportGeneration";
+          const currentGeneration = Number(window[generationKey] || 0);
+          if (generation < currentGeneration) {
+            return false;
+          }
+          window[generationKey] = generation;
+
+          function isCurrentGeneration() {
+            return Number(window[generationKey] || 0) === generation;
+          }
+
+          function scrollByDelta(delta) {
+            if (Math.abs(delta) <= 2) {
+              return;
+            }
+            const scroller = document.scrollingElement || document.documentElement || document.body;
+            const before = scroller ? scroller.scrollTop : window.scrollY || 0;
+            window.scrollBy(0, delta);
+            if (scroller && typeof scroller.scrollTop === "number") {
+              scroller.scrollTop = before + delta;
+            }
+          }
+
+          function decorationRects() {
+            const containers = Array.from(document.querySelectorAll("[data-group]"))
+              .filter(element => element.getAttribute("data-group") === decorationGroup);
+            const container = containers[containers.length - 1];
+            if (!container) {
+              return [];
+            }
+
+            return Array.from(container.querySelectorAll("div"))
+              .map(element => element.getBoundingClientRect())
+              .filter(rect => rect.width > 0 && rect.height > 0);
+          }
+
+          function adjustViewport(rects) {
+            if (scrollPolicy === "none" || !rects.length) {
+              return false;
+            }
+
+            const top = rects.reduce((value, rect) => Math.min(value, rect.top), Infinity);
+            const bottom = rects.reduce((value, rect) => Math.max(value, rect.bottom), -Infinity);
+            const highlightCenter = (top + bottom) / 2;
+            const readableTop = \(topInsetValue);
+            const readableBottom = Math.max(readableTop + 80, window.innerHeight - \(bottomInsetValue));
+            const readableHeight = Math.max(1, readableBottom - readableTop);
+
+            if (scrollPolicy === "center") {
+              scrollByDelta(highlightCenter - (readableTop + readableHeight * 0.50));
+              return true;
+            }
+
+            const lowerTrigger = readableTop + readableHeight * 0.75;
+            const upperTarget = readableTop + readableHeight * 0.25;
+            if (highlightCenter > lowerTrigger) {
+              scrollByDelta(highlightCenter - upperTarget);
+            }
+            return true;
+          }
+
+          function attempt(remainingFrames) {
+            if (!isCurrentGeneration()) {
+              return;
+            }
+            if (adjustViewport(decorationRects())) {
+              return;
+            }
+            if (remainingFrames > 0) {
+              window.requestAnimationFrame(() => attempt(remainingFrames - 1));
+            }
+          }
+
+          window.requestAnimationFrame(() => attempt(12));
+          return true;
+        })();
+        """
+    }
+
     private static func spokenDOMHighlightScript(
         text: String?,
         selector: String?,
         topInset: CGFloat,
         bottomInset: CGFloat,
         scrollPolicy: SpokenHighlightScrollPolicy,
+        drawsHighlight: Bool,
         generation: Int
     ) -> String {
         let textLiteral = javaScriptLiteral(text ?? "")
@@ -3165,12 +3652,14 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         let topInsetValue = String(format: "%.3f", Double(topInset))
         let bottomInsetValue = String(format: "%.3f", Double(bottomInset))
         let scrollPolicyLiteral = javaScriptLiteral(scrollPolicy.rawValue)
+        let drawsHighlightLiteral = drawsHighlight ? "true" : "false"
         return """
         (() => {
           const layerID = "offline-reader-tts-dom-highlight-layer";
           const rawNeedle = \(textLiteral);
           const selector = \(selectorLiteral);
           const scrollPolicy = \(scrollPolicyLiteral);
+          const drawsHighlight = \(drawsHighlightLiteral);
           const generation = \(generation);
           const generationKey = "__offlineReaderTTSHighlightGeneration";
           const currentGeneration = Number(window[generationKey] || 0);
@@ -3390,6 +3879,9 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
             if (!isCurrentGeneration()) {
               return false;
             }
+            if (!drawsHighlight) {
+              return true;
+            }
 
             const rects = Array.from(range.getClientRects()).filter(rect =>
               rect.width > 0
@@ -3428,7 +3920,9 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
             return true;
           }
 
-          clearHighlight();
+          if (drawsHighlight) {
+            clearHighlight();
+          }
           const roots = [];
           if (selector) {
             const selected = safeQuerySelector(selector);
@@ -3728,6 +4222,7 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
         listeningDoubleTapRecognizer = doubleTapRecognizer
 
         chromeToggleInputToken = navigator.addObserver(.activate { [weak self] _ in
+            self?.clearSearchHighlightFromUserActivation()
             self?.onChromeToggleRequested?()
             return true
         })
@@ -3746,6 +4241,8 @@ final class ReaderSession: NSObject, ReaderSessionProtocol {
                 self.onListeningStateChanged?(.inactive)
                 return
             }
+            self.clearSearchHighlight()
+            self.clearSpokenDecoration()
             await self.startListening(from: point, using: synthesizer)
         }
     }
@@ -4130,6 +4627,7 @@ final class PDFReaderSession: NSObject, ReaderSessionProtocol {
     private var currentListeningState: ReaderListeningState?
     private var speechEngine: ReaderPreferencesSnapshot.SpeechEngine
     private var speechVoiceIdentifier: String
+    private var speechRate: Double
 
     var navigatorViewController: UIViewController {
         navigator
@@ -4155,6 +4653,7 @@ final class PDFReaderSession: NSObject, ReaderSessionProtocol {
         self.publicationHandle = publicationHandle
         self.speechEngine = preferences.speechEngine
         self.speechVoiceIdentifier = preferences.speechVoiceIdentifier
+        self.speechRate = preferences.speechRate
         let locator = try initialLocatorData.map { try LocatorCoding.decode($0) }
         navigator = try PDFNavigatorViewController(
             publication: publicationHandle.publication,
@@ -4210,6 +4709,8 @@ final class PDFReaderSession: NSObject, ReaderSessionProtocol {
         }
     }
 
+    func showSearchHighlight(locatorData: Data, query: String) async {}
+
     func goToTableOfContentsItem(_ itemID: String) async throws {
         guard let link = tocLinksByID[itemID] else {
             throw ReaderAppError.unknown
@@ -4225,6 +4726,13 @@ final class PDFReaderSession: NSObject, ReaderSessionProtocol {
             || speechVoiceIdentifier != snapshot.speechVoiceIdentifier
         speechEngine = snapshot.speechEngine
         speechVoiceIdentifier = snapshot.speechVoiceIdentifier
+        speechRate = snapshot.speechRate
+        speechSynthesizer?.config = NarrationSpeechConfiguration.publicationConfiguration(
+            publicationLanguage: publicationHandle.publication.metadata.language,
+            voiceIdentifier: speechVoiceIdentifier,
+            rateMultiplier: speechRate
+        )
+        speechSynthesizer?.updateRateMultiplier(speechRate)
         if didChangeSpeechEngine {
             speechSynthesizer?.stop()
             speechSynthesizer = nil
@@ -4243,6 +4751,14 @@ final class PDFReaderSession: NSObject, ReaderSessionProtocol {
 
     func pauseOrResumeListening() {
         speechSynthesizer?.pauseOrResume()
+    }
+
+    func skipToPreviousListening() {
+        speechSynthesizer?.previous()
+    }
+
+    func skipToNextListening() {
+        speechSynthesizer?.next()
     }
 
     func focusListeningPosition() async {
@@ -4287,7 +4803,8 @@ final class PDFReaderSession: NSObject, ReaderSessionProtocol {
             publication: publicationHandle.publication,
             config: NarrationSpeechConfiguration.publicationConfiguration(
                 publicationLanguage: publicationHandle.publication.metadata.language,
-                voiceIdentifier: speechVoiceIdentifier
+                voiceIdentifier: speechVoiceIdentifier,
+                rateMultiplier: speechRate
             ),
             engineFactory: { [speechEngine, speechVoiceIdentifier] in
                 switch speechEngine {

@@ -15,6 +15,7 @@ struct ReaderView: View {
     @State private var isSearchPresented = false
     @State private var isListeningPlayerPresented = false
     @State private var isVoiceSwitcherPresented = false
+    @State private var listeningControlSheet: ReaderListeningControlSheet?
     @State private var searchQuery = ""
 
     init(container: AppContainer, router: AppRouter, bookID: UUID) {
@@ -31,6 +32,7 @@ struct ReaderView: View {
             readerListenButton
             modalDimmingLayer
             listeningPlayerOverlay
+            listeningControlSheetOverlay
             voiceSwitcherOverlay
             readerToast
         }
@@ -51,6 +53,7 @@ struct ReaderView: View {
             if !isVisible {
                 isListeningPlayerPresented = false
                 isVoiceSwitcherPresented = false
+                listeningControlSheet = nil
             }
         }
         .onDisappear {
@@ -69,11 +72,12 @@ struct ReaderView: View {
                     await viewModel.search(query: query)
                 },
                 onSelectResult: { result in
-                    await viewModel.goToSearchResult(result)
+                    await viewModel.goToSearchResult(result, query: searchQuery)
                 }
             )
-                .presentationDetents([.height(260), .medium])
+                .presentationDetents([.fraction(0.96)])
                 .presentationDragIndicator(.visible)
+                .presentationCornerRadius(32)
                 .presentationBackground(Color(.systemBackground))
                 .preferredColorScheme(.light)
         }
@@ -254,21 +258,40 @@ struct ReaderView: View {
                 chapterTitle: currentListeningChapterTitle,
                 remainingTimeText: viewModel.readerListeningRemainingText,
                 voiceTitle: selectedSpeechVoiceTitle,
+                speechRate: viewModel.preferences.speechRate,
+                sleepTimerText: viewModel.sleepTimerText,
                 onDismiss: {
                     withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
                         isVoiceSwitcherPresented = false
+                        listeningControlSheet = nil
                         isListeningPlayerPresented = false
                     }
                 },
                 onTogglePlayback: { viewModel.pauseOrResumeListening() },
+                onShowSleepTimer: {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                        isVoiceSwitcherPresented = false
+                        listeningControlSheet = .sleepTimer
+                    }
+                },
+                onShowSpeed: {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                        isVoiceSwitcherPresented = false
+                        listeningControlSheet = .speed
+                    }
+                },
                 onShowVoiceSwitcher: {
                     withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                        listeningControlSheet = nil
                         isVoiceSwitcherPresented = true
                     }
                 },
+                onPrevious: { viewModel.skipToPreviousListening() },
+                onNext: { viewModel.skipToNextListening() },
                 onClose: {
                     withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
                         isVoiceSwitcherPresented = false
+                        listeningControlSheet = nil
                         isListeningPlayerPresented = false
                     }
                     viewModel.stopListening()
@@ -276,6 +299,54 @@ struct ReaderView: View {
             )
             .transition(.opacity.combined(with: .scale(scale: 0.985)))
             .zIndex(20)
+        }
+    }
+
+    @ViewBuilder
+    private var listeningControlSheetOverlay: some View {
+        if let listeningControlSheet,
+           isListeningPlayerPresented {
+            switch listeningControlSheet {
+            case .speed:
+                ReaderListeningSpeedSheet(
+                    value: viewModel.preferences.speechRate,
+                    onChange: { rate in
+                        Task { await viewModel.updateSpeechRate(rate) }
+                    },
+                    onDismiss: {
+                        withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                            self.listeningControlSheet = nil
+                        }
+                    }
+                )
+            case .sleepTimer:
+                ReaderListeningSleepTimerSheet(
+                    selectedText: viewModel.sleepTimerText,
+                    onSelectMinutes: { minutes in
+                        viewModel.setSleepTimer(seconds: minutes * 60)
+                        withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                            self.listeningControlSheet = nil
+                        }
+                    },
+                    onStopAfterCurrent: {
+                        viewModel.setStopAfterCurrentUtterance()
+                        withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                            self.listeningControlSheet = nil
+                        }
+                    },
+                    onCancelTimer: {
+                        viewModel.cancelSleepTimer()
+                        withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                            self.listeningControlSheet = nil
+                        }
+                    },
+                    onDismiss: {
+                        withAnimation(.spring(response: 0.30, dampingFraction: 0.9)) {
+                            self.listeningControlSheet = nil
+                        }
+                    }
+                )
+            }
         }
     }
 
@@ -391,6 +462,11 @@ private enum ReaderPanelMode: Equatable {
         case .settings: "settings"
         }
     }
+}
+
+private enum ReaderListeningControlSheet {
+    case speed
+    case sleepTimer
 }
 
 private enum ReaderPalette {
@@ -546,14 +622,20 @@ private struct ReaderListeningPlayerOverlay: View {
     let chapterTitle: String
     let remainingTimeText: String
     let voiceTitle: String
+    let speechRate: Double
+    let sleepTimerText: String?
     let onDismiss: () -> Void
     let onTogglePlayback: () -> Void
+    let onShowSleepTimer: () -> Void
+    let onShowSpeed: () -> Void
     let onShowVoiceSwitcher: () -> Void
+    let onPrevious: () -> Void
+    let onNext: () -> Void
     let onClose: () -> Void
 
     var body: some View {
         GeometryReader { proxy in
-            let coverWidth = min(proxy.size.width * 0.58, 286)
+            let coverWidth = min(proxy.size.width * 0.50, 236)
             ZStack {
                 Color(.systemBackground)
                     .ignoresSafeArea()
@@ -595,7 +677,7 @@ private struct ReaderListeningPlayerOverlay: View {
                         fileStore: fileStore,
                         contentMode: .fit
                     )
-                    .frame(width: coverWidth, height: coverWidth * 1.32)
+                    .frame(width: coverWidth, height: coverWidth * 1.31)
                     .clipShape(RoundedRectangle(cornerRadius: 5))
                     .shadow(color: .black.opacity(0.12), radius: 24, y: 14)
                     .padding(.top, 34)
@@ -603,12 +685,20 @@ private struct ReaderListeningPlayerOverlay: View {
                     Spacer(minLength: 34)
 
                     HStack(spacing: 0) {
-                        ReaderListeningPlayerActionButton(icon: "alarm", title: "定时关闭")
-                        ReaderListeningPlayerActionButton(icon: "speedometer", title: "倍速", detail: "1.0x")
+                        ReaderListeningPlayerActionButton(
+                            icon: "alarm",
+                            title: sleepTimerText ?? "定时关闭",
+                            action: onShowSleepTimer
+                        )
+                        ReaderListeningPlayerActionButton(
+                            icon: "bolt.circle",
+                            title: "倍速",
+                            detail: Self.rateText(speechRate),
+                            action: onShowSpeed
+                        )
                         ReaderListeningPlayerActionButton(icon: "headphones", title: voiceTitle, action: onShowVoiceSwitcher)
-                        ReaderListeningPlayerActionButton(icon: "book.closed", title: "已加书架")
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 26)
 
                     ReaderListeningProgressBar(remainingTimeText: remainingTimeText)
                         .padding(.top, 34)
@@ -617,7 +707,7 @@ private struct ReaderListeningPlayerOverlay: View {
                     HStack(spacing: 0) {
                         ReaderListeningBottomButton(icon: "list.bullet", title: "目录")
                         Spacer()
-                        ReaderListeningBottomButton(icon: "backward.end.fill", title: "")
+                        ReaderListeningBottomButton(icon: "backward.end.fill", title: "", action: onPrevious)
                         Spacer()
                         Button(action: onTogglePlayback) {
                             Group {
@@ -627,11 +717,11 @@ private struct ReaderListeningPlayerOverlay: View {
                                         .controlSize(.large)
                                 } else {
                                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                                        .font(.system(size: 38, weight: .bold))
+                                        .font(.system(size: 32, weight: .bold))
                                         .foregroundStyle(.white)
                                 }
                             }
-                            .frame(width: 96, height: 96)
+                            .frame(width: 78, height: 78)
                             .background(ReaderPalette.accent, in: Circle())
                         }
                         .disabled(isLoading)
@@ -639,7 +729,7 @@ private struct ReaderListeningPlayerOverlay: View {
                         .accessibilityIdentifier("reader.listeningPlayer.playPause")
                         .accessibilityLabel(isLoading ? "听书加载中" : (isPlaying ? "暂停听书" : "继续听书"))
                         Spacer()
-                        ReaderListeningBottomButton(icon: "forward.end.fill", title: "")
+                        ReaderListeningBottomButton(icon: "forward.end.fill", title: "", action: onNext)
                         Spacer()
                         ReaderListeningBottomButton(icon: "power", title: "退出", action: onClose)
                     }
@@ -652,6 +742,14 @@ private struct ReaderListeningPlayerOverlay: View {
             }
         }
         .accessibilityIdentifier("reader.listeningPlayer")
+    }
+
+    private static func rateText(_ value: Double) -> String {
+        let normalized = ReaderPreferencesSnapshot.normalizedSpeechRate(value)
+        if abs(normalized.rounded() - normalized) < 0.01 {
+            return "\(Int(normalized.rounded()))x"
+        }
+        return String(format: "%.1fx", normalized)
     }
 }
 
@@ -691,6 +789,151 @@ private struct ReaderListeningPlayerActionButton: View {
     }
 }
 
+private struct ReaderListeningSpeedSheet: View {
+    let value: Double
+    let onChange: (Double) -> Void
+    let onDismiss: () -> Void
+    @State private var draftValue: Double = 1.0
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.opacity(0.42)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onDismiss)
+
+            VStack(spacing: 24) {
+                Text("倍速播放：\(rateText(draftValue))")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.42))
+                    .padding(.top, 18)
+
+                VStack(spacing: 12) {
+                    Slider(
+                        value: Binding(
+                            get: { draftValue },
+                            set: { newValue in
+                                draftValue = ReaderPreferencesSnapshot.normalizedSpeechRate(newValue)
+                                onChange(draftValue)
+                            }
+                        ),
+                        in: 0.7 ... 3.0,
+                        step: 0.1
+                    )
+                    .tint(ReaderPalette.accent)
+
+                    HStack {
+                        Text("0.7")
+                        Spacer()
+                        Text("1x")
+                        Spacer()
+                        Text("2x")
+                        Spacer()
+                        Text("3x")
+                    }
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.52))
+                    .padding(.horizontal, 4)
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 18)
+                .background(Color.white.opacity(0.12), in: Capsule())
+
+                Divider()
+                    .background(Color.white.opacity(0.08))
+
+                Button("关闭", action: onDismiss)
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.48))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 46)
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 30)
+            .frame(maxWidth: .infinity)
+            .background(Color(red: 0.05, green: 0.055, blue: 0.06), in: UnevenRoundedRectangle(topLeadingRadius: 18, topTrailingRadius: 18))
+        }
+        .onAppear {
+            draftValue = ReaderPreferencesSnapshot.normalizedSpeechRate(value)
+        }
+        .accessibilityIdentifier("reader.listening.speedSheet")
+        .zIndex(25)
+    }
+
+    private func rateText(_ value: Double) -> String {
+        let normalized = ReaderPreferencesSnapshot.normalizedSpeechRate(value)
+        if abs(normalized.rounded() - normalized) < 0.01 {
+            return "\(Int(normalized.rounded()))x"
+        }
+        return String(format: "%.1fx", normalized)
+    }
+}
+
+private struct ReaderListeningSleepTimerSheet: View {
+    let selectedText: String?
+    let onSelectMinutes: (Int) -> Void
+    let onStopAfterCurrent: () -> Void
+    let onCancelTimer: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Color.black.opacity(0.42)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onDismiss)
+
+            VStack(spacing: 0) {
+                timerButton("15分钟") { onSelectMinutes(15) }
+                timerButton("30分钟") { onSelectMinutes(30) }
+                timerButton("60分钟") { onSelectMinutes(60) }
+                timerButton("播完当前音频再关闭") { onStopAfterCurrent() }
+                timerButton("关闭倒计时", tint: ReaderPalette.accent) { onCancelTimer() }
+
+                Button("取消", action: onDismiss)
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 58)
+                    .background(Color.white.opacity(0.10), in: Capsule())
+                    .padding(.top, 18)
+                    .padding(.bottom, 24)
+            }
+            .padding(.horizontal, 18)
+            .frame(maxWidth: .infinity)
+            .background(Color.black, in: UnevenRoundedRectangle(topLeadingRadius: 14, topTrailingRadius: 14))
+        }
+        .accessibilityIdentifier("reader.listening.sleepTimerSheet")
+        .zIndex(25)
+    }
+
+    private func timerButton(
+        _ title: String,
+        tint: Color = .white.opacity(0.50),
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 19, weight: selectedText == title ? .semibold : .regular))
+                    .foregroundStyle(selectedText == title ? ReaderPalette.accent : tint)
+                Spacer()
+                if selectedText == title {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(ReaderPalette.accent)
+                }
+            }
+            .frame(height: 56)
+            .padding(.horizontal, 4)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(height: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct ReaderListeningProgressBar: View {
     let remainingTimeText: String
 
@@ -706,18 +949,19 @@ private struct ReaderListeningProgressBar: View {
                 GeometryReader { proxy in
                     Capsule()
                         .fill(ReaderPalette.accent.opacity(0.84))
-                        .frame(width: proxy.size.width * 0.36, height: 4)
+                        .frame(width: max(6, proxy.size.width * 0.06), height: 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Text("00:00 / \(remainingTimeText)")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Color.black.opacity(0.86), in: Capsule())
+                        .offset(x: max(0, proxy.size.width * 0.04), y: -1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(height: 4)
-
-                Text("00:00 / \(remainingTimeText)")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.86), in: Capsule())
-                    .offset(y: -1)
+                .frame(height: 34)
             }
 
             ReaderListeningSkipLabel(text: "30", suffix: "+")
@@ -1116,7 +1360,7 @@ private struct ReaderSearchSheet: View {
                             dismiss()
                         }
                     } label: {
-                        ReaderSearchResultRow(result: result)
+                        ReaderSearchResultRow(result: result, query: trimmedQuery)
                     }
                     .buttonStyle(.plain)
                     .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
@@ -1132,6 +1376,7 @@ private struct ReaderSearchSheet: View {
 
 private struct ReaderSearchResultRow: View {
     let result: ReaderSearchResultItem
+    let query: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1140,13 +1385,64 @@ private struct ReaderSearchResultRow: View {
                 .foregroundStyle(Color(.label))
                 .lineLimit(1)
 
-            Text(result.snippet)
+            Text(highlightedSnippet)
                 .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(ReaderPalette.secondaryText)
                 .lineLimit(2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 12)
+    }
+
+    private var highlightedSnippet: AttributedString {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visibleSnippet = Self.visibleSnippet(from: result.snippet, matching: trimmedQuery)
+        var attributed = AttributedString(visibleSnippet)
+        attributed.foregroundColor = ReaderPalette.secondaryText
+        guard !trimmedQuery.isEmpty else {
+            return attributed
+        }
+
+        var searchStart = attributed.startIndex
+        while let range = attributed[searchStart...].range(
+            of: trimmedQuery,
+            options: [.caseInsensitive, .diacriticInsensitive]
+        ) {
+            attributed[range].foregroundColor = ReaderPalette.accent
+            attributed[range].font = .system(size: 14, weight: .semibold)
+            searchStart = range.upperBound
+            guard searchStart < attributed.endIndex else {
+                break
+            }
+        }
+        return attributed
+    }
+
+    private static func visibleSnippet(from snippet: String, matching query: String) -> String {
+        let collapsed = collapseWhitespace(snippet)
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        guard !trimmedQuery.isEmpty,
+              let range = collapsed.range(of: trimmedQuery, options: options)
+        else {
+            return collapsed
+        }
+
+        let prefixLength = collapsed.distance(from: collapsed.startIndex, to: range.lowerBound)
+        let suffixLength = collapsed.distance(from: range.upperBound, to: collapsed.endIndex)
+        let context = 26
+        let startOffset = max(0, prefixLength - context)
+        let endOffset = min(collapsed.count, prefixLength + trimmedQuery.count + context)
+        let start = collapsed.index(collapsed.startIndex, offsetBy: startOffset)
+        let end = collapsed.index(collapsed.startIndex, offsetBy: endOffset)
+        let prefix = startOffset > 0 ? "…" : ""
+        let suffix = suffixLength > context ? "…" : ""
+        return prefix + String(collapsed[start..<end]) + suffix
+    }
+
+    private static func collapseWhitespace(_ string: String) -> String {
+        string
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 }
 

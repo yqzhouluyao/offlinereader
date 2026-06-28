@@ -8,9 +8,10 @@ actor WiFiTransferService {
     private let downloadProvider: @Sendable (UUID) async throws -> TransferDownloadItem
     private let deleteHandler: @Sendable (UUID) async throws -> Void
     private let addressResolver: @Sendable () -> String?
-    private let port: UInt16
+    private let preferredPort: UInt16
+    private let fallbackPorts: [UInt16]
     private var server: HTTPServer?
-    private var serverTask: Task<Void, Never>?
+    private var serverTask: Task<Void, any Error>?
     private var token: TransferToken?
     private var endpoint: TransferEndpoint?
     private var activeUploads: [UUID: UploadSession] = [:]
@@ -30,7 +31,8 @@ actor WiFiTransferService {
             throw ReaderAppError.missingBookFile
         },
         addressResolver: @escaping @Sendable () -> String? = { LocalAddressResolver.wifiAddress() },
-        port: UInt16 = 8080
+        port: UInt16 = 8080,
+        fallbackPorts: [UInt16]? = nil
     ) {
         self.fileStore = fileStore
         self.importService = importService
@@ -38,7 +40,8 @@ actor WiFiTransferService {
         self.downloadProvider = downloadProvider
         self.deleteHandler = deleteHandler
         self.addressResolver = addressResolver
-        self.port = port
+        self.preferredPort = port
+        self.fallbackPorts = fallbackPorts ?? Self.defaultFallbackPorts(excluding: port)
     }
 
     func snapshots() -> AsyncStream<WiFiTransferSnapshot> {
@@ -61,29 +64,24 @@ actor WiFiTransferService {
         let token = TransferToken.make()
         self.token = token
 
-        let server = HTTPServer(port: port, logger: .disabled)
-        await installRoutes(on: server)
-        self.server = server
-        serverTask = Task {
+        var lastError: Error?
+        for candidatePort in candidatePorts {
             do {
-                try await server.run()
-            } catch is CancellationError {
+                let endpoint = try await startServer(address: address, port: candidatePort, token: token)
+                AppLog.wifiImport.info("Transfer server listening on port \(candidatePort, privacy: .public)")
+                return endpoint
             } catch {
-                if !Task.isCancelled {
-                    AppLog.wifiImport.error("Transfer server stopped with error")
-                }
+                lastError = error
+                AppLog.wifiImport.error("Transfer server failed on port \(candidatePort, privacy: .public): \(String(describing: error), privacy: .public)")
+                await tearDownServer(timeout: 0)
             }
         }
-        try await server.waitUntilListening()
-        guard let url = URL(string: "http://\(address):\(port)")
-        else {
-            state = .failed(message: ReaderAppError.transferServerFailed.localizedDescription, recoverable: true)
-            throw ReaderAppError.transferServerFailed
+
+        tokenDidFailToStart()
+        if let lastError {
+            AppLog.wifiImport.error("Transfer server exhausted all ports: \(String(describing: lastError), privacy: .public)")
         }
-        let endpoint = TransferEndpoint(url: url, expiresAt: token.expiresAt)
-        self.endpoint = endpoint
-        state = .ready(url: url, expiresAt: token.expiresAt)
-        return endpoint
+        throw ReaderAppError.transferServerFailed
     }
 
     func stop() async throws {
@@ -91,12 +89,7 @@ actor WiFiTransferService {
             await session.cancelAndDelete()
         }
         activeUploads = [:]
-        serverTask?.cancel()
-        serverTask = nil
-        if let server {
-            await server.stop(timeout: 1)
-        }
-        server = nil
+        await tearDownServer(timeout: 1)
         endpoint = nil
         token = nil
         state = .idle
@@ -108,6 +101,59 @@ actor WiFiTransferService {
 
     func currentSnapshot() -> WiFiTransferSnapshot {
         WiFiTransferSnapshot(state: state)
+    }
+
+    private var candidatePorts: [UInt16] {
+        [preferredPort] + fallbackPorts.filter { $0 != preferredPort }
+    }
+
+    private static func defaultFallbackPorts(excluding port: UInt16) -> [UInt16] {
+        (8080 ... 8099).compactMap { candidate in
+            let candidatePort = UInt16(candidate)
+            return candidatePort == port ? nil : candidatePort
+        }
+    }
+
+    private func startServer(address: String, port: UInt16, token: TransferToken) async throws -> TransferEndpoint {
+        let server = HTTPServer(port: port, logger: .disabled)
+        await installRoutes(on: server)
+        self.server = server
+
+        let runTask = Task<Void, any Error> {
+            try await server.run()
+        }
+        serverTask = runTask
+        try await waitUntilServerIsListening(server)
+
+        guard let url = URL(string: "http://\(address):\(port)") else {
+            throw ReaderAppError.transferServerFailed
+        }
+        let endpoint = TransferEndpoint(url: url, expiresAt: token.expiresAt)
+        self.endpoint = endpoint
+        state = .ready(url: url, expiresAt: token.expiresAt)
+        return endpoint
+    }
+
+    private func waitUntilServerIsListening(_ server: HTTPServer) async throws {
+        try await server.waitUntilListening(timeout: 1.5)
+        guard await server.isListening else {
+            throw ReaderAppError.transferServerFailed
+        }
+    }
+
+    private func tearDownServer(timeout: TimeInterval) async {
+        serverTask?.cancel()
+        serverTask = nil
+        if let server {
+            await server.stop(timeout: timeout)
+        }
+        server = nil
+    }
+
+    private func tokenDidFailToStart() {
+        endpoint = nil
+        token = nil
+        state = .failed(message: ReaderAppError.transferServerFailed.localizedDescription, recoverable: true)
     }
 
     private func installRoutes(on server: HTTPServer) async {

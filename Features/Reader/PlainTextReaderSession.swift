@@ -154,6 +154,10 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
         viewController.scrollToProgress(progress, animated: true)
     }
 
+    func showSearchHighlight(locatorData: Data, query: String) async {
+        try? await go(to: locatorData)
+    }
+
     func goToTableOfContentsItem(_ itemID: String) async throws {
         throw ReaderAppError.unknown
     }
@@ -161,12 +165,22 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
     func applyPreferences(_ snapshot: ReaderPreferencesSnapshot) async {
         let didChangeSpeechEngine = preferences.speechEngine != snapshot.speechEngine
             || preferences.speechVoiceIdentifier != snapshot.speechVoiceIdentifier
+        let didChangeSpeechRate = preferences.speechRate != snapshot.speechRate
+        let restartLocation = currentSpokenPhraseRange?.location
+            ?? activePlaybackUtterance?.nsRange.location
+            ?? currentUtteranceIndex.flatMap { utterances.indices.contains($0) ? utterances[$0].nsRange.location : nil }
         preferences = snapshot
         if didChangeSpeechEngine {
             prefetchedEdgeUtteranceIndexes.removeAll()
         }
         if didChangeSpeechEngine, isListeningActive {
             stopListening()
+        } else if didChangeSpeechRate, isListeningActive {
+            if preferences.speechEngine == .edgeReadAloud {
+                edgeSpeechEngine?.updatePlaybackRate(snapshot.speechRate)
+            } else if let restartLocation {
+                beginListening(startingAt: restartLocation)
+            }
         }
         viewController.apply(preferences: snapshot)
     }
@@ -197,6 +211,27 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
             speechSynthesizer.pauseSpeaking(at: .word)
             notifyCurrentUtterance(isPlaying: false)
         }
+    }
+
+    func skipToPreviousListening() {
+        guard let index = currentUtteranceIndex else {
+            beginListening(startIndex: 0)
+            return
+        }
+        beginListening(startIndex: max(index - 1, 0))
+    }
+
+    func skipToNextListening() {
+        guard let index = currentUtteranceIndex else {
+            beginListening(startIndex: 0)
+            return
+        }
+        let nextIndex = index + 1
+        guard utterances.indices.contains(nextIndex) else {
+            finishListening()
+            return
+        }
+        beginListening(startIndex: nextIndex)
     }
 
     func focusListeningPosition() async {
@@ -316,7 +351,11 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
         }
 
         let speechUtterance = AVSpeechUtterance(string: utterance.text)
-        NarrationSpeechConfiguration.configure(speechUtterance, text: utterance.text)
+        NarrationSpeechConfiguration.configure(
+            speechUtterance,
+            text: utterance.text,
+            rateMultiplier: preferences.speechRate
+        )
         if preferences.speechEngine == .system,
            let selectedVoice = AVSpeechSynthesisVoice(identifier: preferences.speechVoiceIdentifier) {
             speechUtterance.voice = selectedVoice
@@ -386,6 +425,7 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
 
     private func playCurrentUtteranceWithEdge(_ utterance: PlainTextUtterance) {
         let engine = EdgeReadAloudTTSEngine(voiceIdentifier: preferences.speechVoiceIdentifier)
+        let rateMultiplier = preferences.speechRate
         edgeSpeechEngine = engine
         edgeSpeechTask?.cancel()
         edgeSpeechTask = Task { @MainActor [weak self, engine, utterance] in
@@ -393,6 +433,7 @@ final class PlainTextReaderSession: NSObject, ReaderSessionProtocol {
             let result = await engine.speakText(
                 utterance.text,
                 language: Language(code: .bcp47(languageIdentifier)),
+                rateMultiplier: rateMultiplier,
                 onSpeakRange: { [weak self] range in
                     guard let self,
                           self.isListeningActive,

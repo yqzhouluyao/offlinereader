@@ -17,6 +17,8 @@ final class ReaderViewModel {
     private var lastSaveAt: Date = .distantPast
     private var pendingSaveTask: Task<Void, Never>?
     private var searchGeneration = 0
+    private var sleepTimerTask: Task<Void, Never>?
+    private var stopAfterCurrentUtterance = false
 
     var state: LoadState = .idle
     var book: BookRecord?
@@ -32,6 +34,7 @@ final class ReaderViewModel {
     var isSearching = false
     var listeningState: ReaderListeningState = .inactive
     var isCurrentBookmarkSelected = false
+    var sleepTimerText: String?
     var progressPercentText: String {
         let percent = Int((readingProgress * 100).rounded())
         return "\(percent)%"
@@ -262,6 +265,37 @@ final class ReaderViewModel {
         isSearching = false
     }
 
+    func updateSpeechRate(_ value: Double) async {
+        var updated = preferences
+        updated.speechRate = ReaderPreferencesSnapshot.normalizedSpeechRate(value)
+        await updatePreferences(updated)
+    }
+
+    func setSleepTimer(seconds: Int) {
+        cancelSleepTimer()
+        sleepTimerText = "\(max(1, seconds / 60))分钟"
+        sleepTimerTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            await MainActor.run {
+                self?.stopListening()
+                self?.sleepTimerText = nil
+            }
+        }
+    }
+
+    func setStopAfterCurrentUtterance() {
+        cancelSleepTimer()
+        stopAfterCurrentUtterance = true
+        sleepTimerText = "播完当前音频"
+    }
+
+    func cancelSleepTimer() {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        stopAfterCurrentUtterance = false
+        sleepTimerText = nil
+    }
+
     func startListening() async {
         guard let book,
               let session,
@@ -308,6 +342,18 @@ final class ReaderViewModel {
         }
     }
 
+    func skipToPreviousListening() {
+        if listeningState.isActive {
+            session?.skipToPreviousListening()
+        }
+    }
+
+    func skipToNextListening() {
+        if listeningState.isActive {
+            session?.skipToNextListening()
+        }
+    }
+
     func focusListeningPosition() async {
         if listeningState.isActive {
             await session?.focusListeningPosition()
@@ -317,6 +363,7 @@ final class ReaderViewModel {
     }
 
     func stopListening() {
+        cancelSleepTimer()
         if listeningState.isActive {
             session?.stopListening()
             listeningState = .inactive
@@ -328,9 +375,10 @@ final class ReaderViewModel {
         }
     }
 
-    func goToSearchResult(_ result: ReaderSearchResultItem) async {
+    func goToSearchResult(_ result: ReaderSearchResultItem, query: String) async {
         do {
             try await session?.go(to: result.locatorData)
+            await session?.showSearchHighlight(locatorData: result.locatorData, query: query)
             updateCurrentSectionTitle(from: result.locatorData)
             let locator = try? LocatorCoding.decode(result.locatorData)
             let progress = locator?.locations.totalProgression
@@ -454,7 +502,17 @@ final class ReaderViewModel {
     }
 
     private func syncListeningStore(with state: ReaderListeningState) {
+        let previousListeningState = listeningState
         listeningState = state
+        if stopAfterCurrentUtterance,
+           previousListeningState.isPlaying,
+           !previousListeningState.utteranceText.isEmpty,
+           state.isLoading {
+            stopAfterCurrentUtterance = false
+            sleepTimerText = nil
+            stopListening()
+            return
+        }
         guard let book else {
             return
         }

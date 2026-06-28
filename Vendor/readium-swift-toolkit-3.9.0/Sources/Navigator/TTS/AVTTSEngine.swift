@@ -128,7 +128,7 @@ public class AVTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate, Logg
 
     private func taskUtterance(with task: Task) -> TaskUtterance {
         let utter = TaskUtterance(task: task)
-//        utter.rate = rateMultiplierToAVRate(task.utterance.rateMultiplier)
+        utter.rate = rateMultiplierToAVRate(task.utterance.rateMultiplier)
 //        utter.pitchMultiplier = Float(task.utterance.pitchMultiplier)
         utter.preUtteranceDelay = task.utterance.delay
         utter.voice = voice(for: task.utterance)
@@ -327,6 +327,11 @@ public class AVTTSEngine: NSObject, TTSEngine, AVSpeechSynthesizerDelegate, Logg
 
     private func stopEngine() {
         synthesizer.stopSpeaking(at: .immediate)
+    }
+
+    private func rateMultiplierToAVRate(_ multiplier: Double) -> Float {
+        let base = Double(AVSpeechUtteranceDefaultSpeechRate)
+        return Float((base * min(max(multiplier, 0.7), 3.0)).clamped(to: Self.avRateRange))
     }
 
     private func voice(for utterance: TTSUtterance) -> AVSpeechSynthesisVoice? {

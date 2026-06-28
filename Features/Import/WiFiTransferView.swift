@@ -1,4 +1,3 @@
-import CoreImage.CIFilterBuiltins
 import SwiftUI
 import UIKit
 
@@ -77,19 +76,26 @@ struct WiFiTransferView: View {
 
     private func readyView(url: URL, expiresAt: Date) -> some View {
         ScrollView {
-            VStack(spacing: 20) {
+            VStack(spacing: 18) {
+                Image(systemName: "wifi")
+                    .font(.system(size: 42, weight: .medium))
+                    .foregroundStyle(.blue)
                 Text("wifi.permission_note")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                QRCodeView(text: url.absoluteString)
-                    .frame(width: 220, height: 220)
-                    .padding(.vertical, 8)
                 Text(url.absoluteString)
-                    .font(.system(.callout, design: .monospaced))
+                    .font(.system(.body, design: .monospaced))
+                    .fontWeight(.semibold)
                     .textSelection(.enabled)
                     .multilineTextAlignment(.center)
-                ShareLink(item: url) {
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: 360)
+                    .background(.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                Button {
+                    UIPasteboard.general.string = url.absoluteString
+                } label: {
                     Label("wifi.copy_url", systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.bordered)
@@ -123,38 +129,3 @@ struct WiFiTransferView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
-
-private struct QRCodeView: View {
-    let text: String
-    private let context = CIContext()
-    private let filter = CIFilter.qrCodeGenerator()
-
-    var body: some View {
-        if let image {
-            Image(uiImage: image)
-                .interpolation(.none)
-                .resizable()
-                .scaledToFit()
-                .accessibilityLabel(Text("wifi.qr_code"))
-        } else {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.secondary.opacity(0.12))
-                .overlay {
-                    Image(systemName: "qrcode")
-                }
-        }
-    }
-
-    private var image: UIImage? {
-        filter.message = Data(text.utf8)
-        guard let output = filter.outputImage else {
-            return nil
-        }
-        let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
-        guard let cgImage = context.createCGImage(scaled, from: scaled.extent) else {
-            return nil
-        }
-        return UIImage(cgImage: cgImage)
-    }
-}
-

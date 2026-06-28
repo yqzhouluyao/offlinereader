@@ -26,6 +26,10 @@ public protocol TTSEngine: AnyObject {
         onSpeakRange: @Sendable @escaping (Range<String.Index>) -> Void
     ) async -> Result<Void, TTSError>
 
+    /// Updates the playback speed of the current utterance when supported by the engine.
+    @MainActor
+    func updatePlaybackRate(_ rateMultiplier: Double)
+
     /// Starts preparing upcoming utterances when the engine supports caching.
     func prefetch(_ utterances: [TTSUtterance])
 }
@@ -34,6 +38,9 @@ public extension TTSEngine {
     func voiceWithIdentifier(_ identifier: String) -> TTSVoice? {
         availableVoices.first { $0.identifier == identifier }
     }
+
+    @MainActor
+    func updatePlaybackRate(_ rateMultiplier: Double) {}
 
     func prefetch(_ utterances: [TTSUtterance]) {}
 }
@@ -58,6 +65,9 @@ public struct TTSUtterance {
     /// language will be used.
     public let voiceOrLanguage: Either<TTSVoice, Language>
 
+    /// Playback speed multiplier. Values below 1.0 are slower and values above 1.0 are faster.
+    public let rateMultiplier: Double
+
     public var language: Language {
         switch voiceOrLanguage {
         case let .left(voice):
@@ -67,9 +77,15 @@ public struct TTSUtterance {
         }
     }
 
-    public init(text: String, delay: TimeInterval, voiceOrLanguage: Either<TTSVoice, Language>) {
+    public init(
+        text: String,
+        delay: TimeInterval,
+        voiceOrLanguage: Either<TTSVoice, Language>,
+        rateMultiplier: Double = 1.0
+    ) {
         self.text = text
         self.delay = delay
         self.voiceOrLanguage = voiceOrLanguage
+        self.rateMultiplier = min(max(rateMultiplier, 0.7), 3.0)
     }
 }
